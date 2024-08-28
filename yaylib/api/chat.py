@@ -22,317 +22,447 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
-
-from .. import client
+from .. import config
 from ..responses import (
     ChatRoomResponse,
     ChatRoomsResponse,
-    TotalChatRequestResponse,
     CreateChatRoomResponse,
     FollowUsersResponse,
     GifsDataResponse,
     MessageResponse,
     MessagesResponse,
+    Response,
     StickerPacksResponse,
+    TotalChatRequestResponse,
     UnreadStatusResponse,
 )
 
 
-class ChatAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+class ChatApi:
+    """チャット API"""
 
-    def accept_chat_requests(self, chat_room_ids: list[int]):
-        return self.__base._request(
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
+
+        self.__client: Client = client
+
+    async def accept_chat_requests(self, **params) -> Response:
+        """チャットリクエストを承認する
+
+        Args:
+            chat_room_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/chat_rooms/accept_chat_request",
-            payload={"chat_room_ids": chat_room_ids},
-            bypass_delay=True,
+            config.API_HOST + "/v1/chat_rooms/accept_chat_request",
+            json=params,
+            return_type=Response,
         )
 
-    def check_unread_status(self, from_time: int) -> UnreadStatusResponse:
-        return self.__base._request(
+    async def check_unread_status(self, **params) -> UnreadStatusResponse:
+        """チャットの未読ステータスを確認する
+
+        Args:
+            from_time (int):
+
+        Returns:
+            UnreadStatusResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/chat_rooms/unread_status",
-            params={"from_time": from_time},
-            data_type=UnreadStatusResponse,
-            bypass_delay=True,
+            config.API_HOST + "/v1/chat_rooms/unread_status",
+            params=params,
+            return_type=UnreadStatusResponse,
         )
 
-    def create_group_chat(
-        self,
-        name: str,
-        with_user_ids: list[int],
-        icon_filename: str = None,
-        background_filename: str = None,
-    ) -> CreateChatRoomResponse:
-        return self.__base._request(
+    async def create_group_chat(self, **params) -> CreateChatRoomResponse:
+        """グループチャットを作成する
+
+        Args:
+            name (str):
+            with_user_ids (List[int]):
+            icon_filename (str, optional):
+            background_filename (str, optional):
+
+        Returns:
+            CreateChatRoomResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v3/chat_rooms/new",
-            payload={
-                "name": name,
-                "with_user_ids": with_user_ids,
-                "icon_filename": icon_filename,
-                "background_filename": background_filename,
-            },
-            data_type=CreateChatRoomResponse,
+            config.API_HOST + "/v3/chat_rooms/new",
+            json=params,
+            return_type=CreateChatRoomResponse,
         )
 
-    def create_private_chat(
-        self, with_user_id: int, matching_id: int = None, hima_chat: bool = False
-    ) -> CreateChatRoomResponse:
-        return self.__base._request(
+    async def create_private_chat(self, **params) -> CreateChatRoomResponse:
+        """個人チャットを作成する
+
+        Args:
+            with_user_id (int):
+            matching_id (int, optional):
+            hima_chat (bool, optional):
+
+        Returns:
+            CreateChatRoomResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/chat_rooms/new",
-            payload={
-                "with_user_id": with_user_id,
-                "matching_id": matching_id,
-                "hima_chat": hima_chat,
-            },
-            data_type=CreateChatRoomResponse,
+            config.API_HOST + "/v1/chat_rooms/new",
+            json=params,
+            return_type=CreateChatRoomResponse,
         )
 
-    def delete_background(self, room_id: int):
-        return self.__base._request(
+    async def delete_chat_background(self, room_id: int) -> Response:
+        """チャットの背景を削除する
+
+        Args:
+            room_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v2/chat_rooms/{room_id}/background",
-            bypass_delay=True,
+            config.API_HOST + f"/v2/chat_rooms/{room_id}/background",
+            return_type=Response,
         )
 
-    def delete_message(self, room_id: int, message_id: int):
-        return self.__base._request(
+    async def delete_message(self, room_id: int, message_id: int) -> Response:
+        """チャットメッセージを削除する
+
+        Args:
+            room_id (int):
+            message_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/chat_rooms/{room_id}/messages/{message_id}/delete",
-            bypass_delay=True,
+            config.API_HOST + f"/v1/chat_rooms/{room_id}/messages/{message_id}/delete",
+            return_type=Response,
         )
 
-    def edit_chat_room(
-        self,
-        chat_room_id: int,
-        name: str,
-        icon_filename: str = None,
-        background_filename: str = None,
-    ):
-        return self.__base._request(
+    async def edit_chat_room(self, chat_room_id: int, **params) -> Response:
+        """チャットルームを編集する
+
+        Args:
+            chat_room_id (int):
+            name (str):
+            icon_filename (str, optional):
+            background_filename (str, optional):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/chat_rooms/{chat_room_id}/edit",
-            payload={
-                "name": name,
-                "icon_filename": icon_filename,
-                "background_filename": background_filename,
-            },
-            bypass_delay=True,
+            config.API_HOST + f"/v1/chat_rooms/{chat_room_id}/edit",
+            json=params,
+            return_type=Response,
         )
 
-    def get_chatable_users(
+    async def get_chatable_users(
         self,
         # @Body @Nullable SearchUsersRequest searchUsersRequest
-        from_follow_id: int = None,
-        from_timestamp: int = None,
-        order_by: str = None,
+        **params,
     ) -> FollowUsersResponse:
-        return self.__base._request(
+        """チャット可能なユーザーを取得する
+
+        Args:
+            from_follow_id (int, optional):
+            from_timestamp (int, optional):
+            order_by (str, optional):
+
+        Returns:
+            FollowUsersResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/users/followings/chatable",
-            payload={
-                "from_follow_id": from_follow_id,
-                "from_timestamp": from_timestamp,
-                "order_by": order_by,
-            },
-            data_type=FollowUsersResponse,
+            config.API_HOST + "/v1/users/followings/chatable",
+            json=params,
+            return_type=FollowUsersResponse,
         )
 
-    def get_gifs_data(self) -> GifsDataResponse:
-        return self.__base._request(
+    async def get_gifs_data(self) -> GifsDataResponse:
+        """チャット用 GIF データを取得する
+
+        Returns:
+            GifsDataResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/hidden/chats",
-            data_type=GifsDataResponse,
-            bypass_delay=True,
+            config.API_HOST + "/v1/hidden/chats",
+            return_type=GifsDataResponse,
         )
 
-    def get_hidden_chat_rooms(self, **params) -> ChatRoomsResponse:
+    async def get_hidden_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """非表示に設定したチャットルームを取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional)
+
+        Returns:
+            ChatRoomsResponse:
         """
-
-        Parameters:
-        ---------------
-
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/hidden/chats",
+            config.API_HOST + "/v1/hidden/chats",
             params=params,
-            data_type=ChatRoomsResponse,
-            bypass_delay=True,
+            return_type=ChatRoomsResponse,
         )
 
-    def get_main_chat_rooms(self, from_timestamp: int = None) -> ChatRoomsResponse:
-        params = {}
-        if from_timestamp:
-            params["from_timestamp"] = from_timestamp
-        return self.__base._request(
-            "GET",
-            route=f"/v1/chat_rooms/main_list",
-            params=params,
-            data_type=ChatRoomsResponse,
-            bypass_delay=True,
-        )
+    async def get_main_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """メインのチャットルームを取得する
 
-    def get_messages(self, chat_room_id: int, **params) -> MessagesResponse:
+        Args:
+            from_timestamp (int, optional):
+
+        Returns:
+            ChatRoomsResponse:
         """
-
-        Parameters:
-        ---------------
-            - from_message_id: int - (optional)
-            - to_message_id: int - (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v2/chat_rooms/{chat_room_id}/messages",
+            config.API_HOST + "/v1/chat_rooms/main_list",
             params=params,
-            data_type=MessagesResponse,
-            bypass_delay=True,
+            return_type=ChatRoomsResponse,
         )
 
-    def get_request_chat_rooms(self, **params) -> ChatRoomsResponse:
+    async def get_messages(self, chat_room_id: int, **params) -> MessagesResponse:
+        """メッセージを取得する
+
+        Args:
+            from_message_id (int, optional):
+            to_message_id (int, optional):
+
+        Returns:
+            MessagesResponse:
         """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + f"/v2/chat_rooms/{chat_room_id}/messages",
+            params=params,
+            return_type=MessagesResponse,
+        )
 
-        Parameters:
-        -----------
+    async def get_chat_requests(self, **params) -> ChatRoomsResponse:
+        """チャットリクエストを取得する
 
-            - number: int (optional)
-            - from_timestamp: int (optional)
+        Args:
+            number (int, optional):
+            from_timestamp (int, optional):
 
+        Returns:
+            ChatRoomsResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/chat_rooms/request_list",
+            config.API_HOST + "/v1/chat_rooms/request_list",
             params=params,
-            data_type=ChatRoomsResponse,
-            bypass_delay=True,
+            return_type=ChatRoomsResponse,
         )
 
-    def get_chat_room(self, chat_room_id: int) -> ChatRoomResponse:
-        return self.__base._request(
+    async def get_chat_room(self, chat_room_id: int) -> ChatRoomResponse:
+        """チャットルームを取得する
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            ChatRoomResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/chat_rooms/{chat_room_id}",
-            data_type=ChatRoomResponse,
-            bypass_delay=True,
+            config.API_HOST + f"/v2/chat_rooms/{chat_room_id}",
+            return_type=ChatRoomResponse,
         )
 
-    def get_sticker_packs(self) -> StickerPacksResponse:
-        return self.__base._request(
+    async def get_sticker_packs(self) -> StickerPacksResponse:
+        """チャット用のスタンプを取得する
+
+        Returns:
+            StickerPacksResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route="/v2/sticker_packs",
-            data_type=StickerPacksResponse,
-            bypass_delay=True,
+            config.API_HOST + "/v2/sticker_packs",
+            return_type=StickerPacksResponse,
         )
 
-    def get_total_chat_requests(self) -> TotalChatRequestResponse:
-        return self.__base._request(
+    async def get_total_chat_requests(self) -> TotalChatRequestResponse:
+        """チャットリクエストの総数を取得する
+
+        Returns:
+            TotalChatRequestResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/chat_rooms/total_chat_request",
-            data_type=TotalChatRequestResponse,
+            config.API_HOST + "/v1/chat_rooms/total_chat_request",
+            return_type=TotalChatRequestResponse,
         )
 
-    def hide_chat(self, chat_room_id: int):
-        return self.__base._request(
+    async def hide_chat(self, chat_room_id: int) -> Response:
+        """チャットルームを非表示にする
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/hidden/chats",
-            payload={"chat_room_id": chat_room_id},
+            config.API_HOST + "/v1/hidden/chats",
+            json={"chat_room_id": chat_room_id},
+            return_type=Response,
         )
 
-    def invite_to_chat(self, chat_room_id: int, user_ids: list[int]):
-        return self.__base._request(
+    async def invite_to_chat(self, chat_room_id: int, **params) -> Response:
+        """チャットルームにユーザーを招待する
+
+        Args:
+            chat_room_id (int):
+            with_user_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/chat_rooms/{chat_room_id}/invite",
-            payload={"with_user_ids": user_ids},
+            config.API_HOST + f"/v2/chat_rooms/{chat_room_id}/invite",
+            json=params,
+            return_type=Response,
         )
 
-    def kick_users_from_chat(self, chat_room_id: int, user_ids: list[int]):
-        return self.__base._request(
+    async def kick_users_from_chat(self, chat_room_id: int, **params) -> Response:
+        """チャットルームからユーザーを追放する
+
+        Args:
+            chat_room_id (int):
+            with_user_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/chat_rooms/{chat_room_id}/kick",
-            payload={"with_user_ids": user_ids},
+            config.API_HOST + f"/v2/chat_rooms/{chat_room_id}/kick",
+            json=params,
+            return_type=Response,
         )
 
-    def pin_chat(self, room_id: int):
-        return self.__base._request("POST", route=f"/v1/chat_rooms/{room_id}/pinned")
+    async def pin_chat(self, room_id: int) -> Response:
+        """チャットルームをピン留めする
 
-    def read_message(self, chat_room_id: int, message_id: int):
-        return self.__base._request(
+        Args:
+            room_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/chat_rooms/{chat_room_id}/messages/{message_id}/read",
+            config.API_HOST + f"/v1/chat_rooms/{room_id}/pinned",
+            return_type=Response,
         )
 
-    def refresh_chat_rooms(self, from_time: int = None) -> ChatRoomsResponse:
-        params = {}
-        if from_time:
-            params["from_time"] = from_time
-        return self.__base._request(
+    async def read_message(self, chat_room_id: int, message_id: int) -> Response:
+        """メッセージを既読にする
+
+        Args:
+            chat_room_id (int):
+            message_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST
+            + f"/v2/chat_rooms/{chat_room_id}/messages/{message_id}/read",
+            return_type=Response,
+        )
+
+    async def refresh_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """チャットルームを更新する
+
+        Args:
+            from_time (int, optional):
+
+        Returns:
+            ChatRoomsResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/chat_rooms/update",
+            config.API_HOST + "/v2/chat_rooms/update",
             params=params,
-            data_type=ChatRoomsResponse,
+            return_type=ChatRoomsResponse,
         )
 
-    def remove_chat_rooms(self, chat_room_ids: list[int]):
-        chat_room_ids = (
-            [chat_room_ids] if isinstance(chat_room_ids, int) else chat_room_ids
-        )
-        return self.__base._request(
+    async def delete_chat_rooms(self, **params) -> Response:
+        """チャットルームを削除する
+
+        Args:
+            chat_room_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/chat_rooms/mass_destroy",
-            payload={"chat_room_ids": chat_room_ids},
+            config.API_HOST + "/v1/chat_rooms/mass_destroy",
+            json=params,
+            return_type=Response,
         )
 
-    def report_chat_room(
-        self,
-        chat_room_id: int,
-        opponent_id: int,
-        category_id: int,
-        reason: str = None,
-        screenshot_filename: str = None,
-        screenshot_2_filename: str = None,
-        screenshot_3_filename: str = None,
-        screenshot_4_filename: str = None,
-    ):
-        return self.__base._request(
+    async def send_message(self, chat_room_id: int, **params) -> MessageResponse:
+        """チャットを送信する
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            MessageResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v3/chat_rooms/{chat_room_id}/report",
-            payload={
-                "chat_room_id": chat_room_id,
-                "opponent_id": opponent_id,
-                "category_id": category_id,
-                "reason": reason,
-                "screenshot_filename": screenshot_filename,
-                "screenshot_2_filename": screenshot_2_filename,
-                "screenshot_3_filename": screenshot_3_filename,
-                "screenshot_4_filename": screenshot_4_filename,
-            },
+            config.API_HOST + f"/v3/chat_rooms/{chat_room_id}/messages/new",
+            json=params,
+            return_type=MessageResponse,
         )
 
-    def send_message(self, chat_room_id: int, **params) -> MessageResponse:
-        return self.__base._request(
-            "POST",
-            route=f"/v3/chat_rooms/{chat_room_id}/messages/new",
-            payload=params,
-            data_type=MessageResponse,
-            bypass_delay=True,
-        )
+    async def unhide_chat(self, **params) -> Response:
+        """非表示に設定したチャットルームを表示する
 
-    def unhide_chat(self, chat_room_ids: int):
-        return self.__base._request(
+        Args:
+            chat_room_ids (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/hidden/chats",
-            params={"chat_room_ids": chat_room_ids},
+            config.API_HOST + "/v1/hidden/chats",
+            params=params,
+            return_type=Response,
         )
 
-    def unpin_chat(self, chat_room_id: int):
-        return self.__base._request(
-            "DELETE", route=f"/v1/chat_rooms/{chat_room_id}/pinned"
+    async def unpin_chat(self, chat_room_id: int) -> Response:
+        """チャットのピン留めを解除する
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "DELETE",
+            config.API_HOST + f"/v1/chat_rooms/{chat_room_id}/pinned",
+            return_type=Response,
         )

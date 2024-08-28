@@ -22,69 +22,116 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
+from typing import List
 
-from .. import client
-from ..responses import ReviewsResponse
+from .. import config
+from ..responses import Response, ReviewsResponse
 
 
-class ReviewAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+class ReviewApi:
+    """レビュー API"""
 
-    def create_review(self, user_id: int, comment: str):
-        return self.__base._request(
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
+
+        self.__client: Client = client
+
+    async def create_review(self, user_id: int, comment: str) -> Response:
+        """レターを送信する
+
+        Args:
+            user_id (int):
+            comment (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/users/reviews/{user_id}",
-            payload={"comment": comment},
+            config.API_HOST + f"/v1/users/reviews/{user_id}",
+            json={"comment": comment},
+            return_type=Response,
         )
 
-    def delete_reviews(self, review_ids: list[int]):
-        return self.__base._request(
+    async def delete_reviews(self, review_ids: List[int]) -> Response:
+        """レターを削除する
+
+        Args:
+            review_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/users/reviews",
+            config.API_HOST + "/v1/users/reviews",
             params={"review_ids[]": review_ids},
+            return_type=Response,
         )
 
-    def get_my_reviews(self, **params) -> ReviewsResponse:
+    async def get_my_reviews(self, **params) -> ReviewsResponse:
+        """送信したレターを取得する
+
+        Args:
+            from_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            ReviewsResponse:
         """
-
-        Parameters
-        ----------
-
-            - from_id: int (optional)
-            - number: int = (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/reviews/mine",
+            config.API_HOST + "/v1/users/reviews/mine",
             params=params,
-            data_type=ReviewsResponse,
+            return_type=ReviewsResponse,
         )
 
-    def get_reviews(self, user_id: int, **params) -> ReviewsResponse:
+    async def get_reviews(self, user_id: int, **params) -> ReviewsResponse:
+        """ユーザーが受け取ったレターを取得する
+
+        Args:
+            user_id (int):
+            from_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            ReviewsResponse:
         """
-
-        Parameters
-        ----------
-
-            - user_id: int (required)
-            - from_id: int = (optional)
-            - number: int = (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/reviews/{user_id}",
+            config.API_HOST + f"/v1/users/reviews/{user_id}",
             params=params,
-            data_type=ReviewsResponse,
+            return_type=ReviewsResponse,
         )
 
-    def pin_review(self, review_id: int):
-        return self.__base._request(
-            "POST", route=f"/v1/pinned/reviews", payload={"id": review_id}
+    async def pin_review(self, review_id: int) -> Response:
+        """レターをピン留めする
+
+        Args:
+            review_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + "/v1/pinned/reviews",
+            json={"id": review_id},
+            return_type=Response,
         )
 
-    def unpin_review(self, review_id: int):
-        return self.__base._request("DELETE", route=f"/v1/pinned/reviews{review_id}")
+    async def unpin_review(self, review_id: int) -> Response:
+        """レターのピン留めを解除する
+
+        Args:
+            review_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "DELETE",
+            config.API_HOST + f"/v1/pinned/reviews{review_id}",
+            return_type=Response,
+        )

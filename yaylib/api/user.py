@@ -22,12 +22,10 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
-
 from datetime import datetime
+from typing import List
 
-from .. import client
-from ..config import Configs
+from .. import config
 from ..responses import (
     ActiveFollowingsResponse,
     BlockedUserIdsResponse,
@@ -38,588 +36,727 @@ from ..responses import (
     FollowUsersResponse,
     FootprintsResponse,
     HiddenResponse,
+    HimaUsersResponse,
+    RankingUsersResponse,
     RefreshCounterRequestsResponse,
+    Response,
     SocialShareUsersResponse,
     UserResponse,
-    UsersResponse,
-    RankingUsersResponse,
-    UserEmailResponse,
-    HimaUsersResponse,
     UsersByTimestampResponse,
+    UsersResponse,
     UserTimestampResponse,
 )
 from ..utils import md5, sha256
 
 
-class UserAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+# pylint: disable=too-many-public-methods
+class UserApi:
+    """ユーザー API"""
 
-    def delete_footprint(self, user_id: int, footprint_id: int):
-        return self.__base._request(
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
+
+        self.__client: Client = client
+
+    async def delete_footprint(self, user_id: int, footprint_id: int) -> Response:
+        """足跡を削除する
+
+        Args:
+            user_id (int):
+            footprint_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v2/users/{user_id}/footprints/{footprint_id}",
+            config.API_HOST + f"/v2/users/{user_id}/footprints/{footprint_id}",
+            return_type=Response,
         )
 
-    def destroy_user(self):
-        return self.__base._request(
+    async def follow_user(self, user_id: int) -> Response:
+        """ユーザーをフォローする
+
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/users/destroy",
-            payload={
-                "uuid": self.__base.uuid,
-                "api_key": Configs.API_KEY,
-                "timestamp": int(datetime.now().timestamp()),
-                "signed_info": md5(
-                    self.__base.uuid, int(datetime.now().timestamp()), True
-                ),
-            },
+            config.API_HOST + f"/v2/users/{user_id}/follow",
+            return_type=Response,
         )
 
-    def follow_user(self, user_id: int):
-        return self.__base._request("POST", route=f"/v2/users/{user_id}/follow")
+    async def follow_users(self, user_ids: List[int]) -> Response:
+        """複数のユーザーをフォローする
 
-    def follow_users(self, user_ids: list[int]):
-        return self.__base._request(
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/users/follow",
+            config.API_HOST + "/v2/users/follow",
             params={"user_ids[]": user_ids},
+            return_type=Response,
         )
 
-    def get_active_followings(self, **params) -> ActiveFollowingsResponse:
+    async def get_active_followings(self, **params) -> ActiveFollowingsResponse:
+        """アクティブなフォロー中のユーザーを取得する
+
+        Args:
+            only_online (bool, optional):
+            from_loggedin_at (int, optional):
+
+        Returns:
+            ActiveFollowingsResponse:
         """
-
-        Parameters:
-        -----------
-
-            - only_online: bool
-            - from_loggedin_at: int = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/active_followings",
+            config.API_HOST + "/v1/users/active_followings",
             params=params,
-            data_type=ActiveFollowingsResponse,
+            return_type=ActiveFollowingsResponse,
         )
 
-    def get_follow_recommendations(self, **params) -> FollowRecommendationsResponse:
+    async def get_follow_recommendations(
+        self, **params
+    ) -> FollowRecommendationsResponse:
+        """フォローするのにおすすめのユーザーを取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional):
+            sources (List[str], optional):
+
+        Returns:
+            FollowRecommendationsResponse:
         """
-
-        Parameters:
-        -----------
-
-            - from_timestamp: int = None,
-            - number: int = None,
-            - sources: list[str] = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/friends",
+            config.API_HOST + "/v1/friends",
             params=params,
-            data_type=FollowRecommendationsResponse,
+            return_type=FollowRecommendationsResponse,
         )
 
-    def get_follow_request(
-        self, from_timestamp: int = None
-    ) -> UsersByTimestampResponse:
-        params = {}
-        if from_timestamp:
-            params["from_timestamp"] = from_timestamp
-        return self.__base._request(
+    async def get_follow_request(self, **params) -> UsersByTimestampResponse:
+        """フォローリクエストを取得する
+
+        Args:
+            from_timestamp (int, optional):
+
+        Returns:
+            UsersByTimestampResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/follow_requests",
+            config.API_HOST + "/v2/users/follow_requests",
             params=params,
-            data_type=UsersByTimestampResponse,
+            return_type=UsersByTimestampResponse,
         )
 
-    def get_follow_request_count(self) -> FollowRequestCountResponse:
-        return self.__base._request(
+    async def get_follow_request_count(self) -> FollowRequestCountResponse:
+        """フォローリクエストの数を取得する
+
+        Returns:
+            FollowRequestCountResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/follow_requests_count",
-            data_type=FollowRequestCountResponse,
+            config.API_HOST + "/v2/users/follow_requests_count",
+            return_type=FollowRequestCountResponse,
         )
 
-    def get_following_users_born(self, birthdate: int = None) -> UsersResponse:
-        params = {}
-        if birthdate:
-            params["birthdate"] = birthdate
-        return self.__base._request(
+    async def get_following_users_born(self, **params) -> UsersResponse:
+        """フォロー中のユーザーの誕生日を取得する
+
+        Args:
+            birthdate (int, optional):
+
+        Returns:
+            UsersResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/following_born_today",
+            config.API_HOST + "/v1/users/following_born_today",
             params=params,
-            data_type=UsersResponse,
+            return_type=UsersResponse,
         )
 
-    def get_footprints(self, **params) -> FootprintsResponse:
+    async def get_footprints(self, **params) -> FootprintsResponse:
+        """足跡を取得する
+
+        Args:
+            from_id (int, optional):
+            number (int, optional):
+            mode (str, optional):
+
+        Returns:
+            FootprintsResponse:
         """
-
-        Parameters:
-        -----------
-
-            - from_id: int = None
-            - number: int = None
-            - mode: str = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/footprints",
+            config.API_HOST + "/v2/users/footprints",
             params=params,
-            data_type=FootprintsResponse,
+            return_type=FootprintsResponse,
         )
 
-    def get_fresh_user(self, user_id: int) -> UserResponse:
-        return self.__base._request(
+    async def get_fresh_user(self, user_id: int) -> UserResponse:
+        """認証情報などを含んだユーザー情報を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/fresh/{user_id}",
-            data_type=UserResponse,
+            config.API_HOST + f"/v2/users/fresh/{user_id}",
+            return_type=UserResponse,
         )
 
-    def get_hima_users(self, **params) -> HimaUsersResponse:
+    async def get_hima_users(self, **params) -> HimaUsersResponse:
+        """暇なユーザーを取得する
+
+        Args:
+            from_hima_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            HimaUsersResponse:
         """
-
-        Parameters:
-        -----------
-
-            - from_hima_id: int = None
-            - number: int = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/hima_users",
+            config.API_HOST + "/v2/users/hima_users",
             params=params,
-            data_type=HimaUsersResponse,
+            return_type=HimaUsersResponse,
         )
 
-    def get_user_ranking(self, mode: str) -> RankingUsersResponse:
-        """
-
-        ユーザーのランキングを取得します
+    async def get_user_ranking(self, mode: str) -> RankingUsersResponse:
+        """ユーザーのフォロワーランキングを取得する
 
         Examples:
-        ---------
+            >>> # ルーキーを取得する:
+            >>> api.get_user_ranking(mode="one_month")
 
-        >>> ルーキーを取得する場合:
+            >>> # ミドルを取得する:
+            >>> api.get_user_ranking(mode="six_months")
 
-        >>> api.get_user_ranking(mode="one_month")
+            >>> # 殿堂入りを取得する:
+            >>> api.get_user_ranking(mode="all_time")
 
-        ---
+        Args:
+            mode (str):
 
-        >>> ミドルを取得する場合:
-
-        >>> api.get_user_ranking(mode="six_months")
-
-        ---
-
-        >>> 殿堂入りを取得する場合:
-
-        >>> api.get_user_ranking(mode="all_time")
-
+        Returns:
+            RankingUsersResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/web/users/ranking",
+            config.API_HOST + "/v1/web/users/ranking",
             params={"mode": mode},
-            data_type=RankingUsersResponse,
+            return_type=RankingUsersResponse,
         )
 
-    def get_refresh_counter_requests(self) -> RefreshCounterRequestsResponse:
-        return self.__base._request(
-            "GET",
-            route=f"/v1/users/reset_counters",
-            data_type=RefreshCounterRequestsResponse,
-        )
-
-    def get_social_shared_users(self, **params) -> SocialShareUsersResponse:
-        """
-
-        Parameters:
-        -----------
-
-            - sns_name: str - (Required)
-            - number: int - (Optional)
-            - from_id: int - (Optional)
-
-        """
-        return self.__base._request(
-            "GET",
-            route=f"/v2/users/social_shared_users",
-            params=params,
-            data_type=SocialShareUsersResponse,
-        )
-
-    def get_timestamp(
+    async def get_profile_refresh_counter_requests(
         self,
-    ) -> UserTimestampResponse:
-        return self.__base._request(
-            "GET",
-            route=f"/v2/users/timestamp",
-            data_type=UserTimestampResponse,
-            bypass_delay=True,
-        )
+    ) -> RefreshCounterRequestsResponse:
+        """投稿数やフォロワー数をリフレッシュするための残リクエスト数を取得する
 
-    def get_user(self, user_id: int) -> UserResponse:
-        return self.__base._request(
-            "GET", route=f"/v2/users/{user_id}", data_type=UserResponse
-        )
-
-    def get_user_email(self, user_id: int) -> UserEmailResponse:
-        return self.__base._request(
-            "GET",
-            route=f"/v2/users/fresh/{user_id}",
-            data_type=UserEmailResponse,
-        )
-
-    def get_user_followers(self, user_id: int, **params) -> FollowUsersResponse:
+        Returns:
+            RefreshCounterRequestsResponse:
         """
-
-        Parameters:
-        -----------
-
-            - user_id: int - (required)
-            - from_follow_id: int - (optional)
-            - followed_by_me: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/{user_id}/followers",
+            config.API_HOST + "/v1/users/reset_counters",
+            return_type=RefreshCounterRequestsResponse,
+        )
+
+    async def get_social_shared_users(self, **params) -> SocialShareUsersResponse:
+        """SNS共有をしたユーザーを取得する
+
+        Args:
+            sns_name (str):
+            number (int, optional):
+            from_id (int, optional):
+
+        Returns:
+            SocialShareUsersResponse:
+        """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + "/v2/users/social_shared_users",
             params=params,
-            data_type=FollowUsersResponse,
+            return_type=SocialShareUsersResponse,
         )
 
-    def get_user_followings(self, user_id: int, **params) -> FollowUsersResponse:
+    async def get_timestamp(self) -> UserTimestampResponse:
+        """タイムスタンプを取得する
+
+        Returns:
+            UserTimestampResponse:
+        """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + "/v2/users/timestamp",
+            return_type=UserTimestampResponse,
+        )
+
+    async def get_user(self, user_id: int) -> UserResponse:
+        """ユーザーの情報を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
+        """
+        return await self.__client.request(
+            "GET", config.API_HOST + f"/v2/users/{user_id}", return_type=UserResponse
+        )
+
+    async def get_user_followers(self, user_id: int, **params) -> FollowUsersResponse:
+        """ユーザーのフォロワーを取得する
+
+        Args:
+            user_id (int):
+            from_follow_id (int, optional):
+            followed_by_me: (int, optional):
+            number: (int, optional):
+
+        Returns:
+            FollowUsersResponse:
+        """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + f"/v2/users/{user_id}/followers",
+            params=params,
+            return_type=FollowUsersResponse,
+        )
+
+    async def get_user_followings(self, user_id: int, **params) -> FollowUsersResponse:
         # @Body @Nullable SearchUsersRequest searchUsersRequest
+        """フォロー中のユーザーを取得する
+
+        Args:
+            user_id (int):
+            from_follow_id (int, optional):
+            from_timestamp (int, optional):
+            order_by (str, optional):
+            number (int, optional):
+
+        Returns:
+            FollowUsersResponse:
         """
-
-        Parameters:
-        -----------
-
-            - user_id: int
-            - from_follow_id: int = None
-            - from_timestamp: int = None
-            - order_by: str = None
-            - number: int - (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "POST",
-            route=f"/v2/users/{user_id}/list_followings",
+            config.API_HOST + f"/v2/users/{user_id}/list_followings",
             params=params,
-            data_type=FollowUsersResponse,
+            return_type=FollowUsersResponse,
         )
 
-    def get_user_from_qr(self, qr: str) -> UserResponse:
-        return self.__base._request(
+    async def get_user_from_qr(self, qr: str) -> UserResponse:
+        """QRコードからユーザーを取得する
+
+        Args:
+            qr (str):
+
+        Returns:
+            UserResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/qr_codes/{qr}",
-            data_type=UserResponse,
+            config.API_HOST + f"/v1/users/qr_codes/{qr}",
+            return_type=UserResponse,
         )
 
-    def get_user_without_leaving_footprint(self, user_id: int) -> UserResponse:
-        return self.__base._request(
+    async def get_user_without_leaving_footprint(self, user_id: int) -> UserResponse:
+        """足跡をつけずにユーザーの情報を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/info/{user_id}",
-            data_type=UserResponse,
+            config.API_HOST + f"/v2/users/info/{user_id}",
+            return_type=UserResponse,
         )
 
-    def get_users(self, user_ids: list[int]) -> UsersResponse:
-        return self.__base._request(
+    async def get_users(self, user_ids: List[int]) -> UsersResponse:
+        """複数のユーザーの情報を取得する
+
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            UsersResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/list_id",
+            config.API_HOST + "/v1/users/list_id",
             params={"user_ids[]": user_ids},
-            data_type=UsersResponse,
+            return_type=UsersResponse,
             jwt_required=True,
         )
 
-    def refresh_counter(self, counter: str):
-        return self.__base._request(
+    async def refresh_profile_counter(self, counter: str) -> Response:
+        """プロフィールのカウンターを更新する
+
+        Args:
+            counter (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/users/reset_counters",
-            payload={"counter": counter},
+            config.API_HOST + "/v1/users/reset_counters",
+            json={"counter": counter},
+            return_type=Response,
         )
 
-    def register(
-        self,
-        email: str,
-        email_grant_token: str,
-        password: str,
-        nickname: str,
-        birth_date: str,
-        gender: int = -1,
-        country_code: str = "JP",
-        biography: str = None,
-        prefecture: str = None,
-        profile_icon_filename: str = None,
-        cover_image_filename: str = None,
+    async def register(self, **params) -> CreateUserResponse:
         # @Nullable @Part("sns_info") SignUpSnsInfoRequest signUpSnsInfoRequest,
-        en: int = None,
-        vn: int = None,
-    ) -> CreateUserResponse:
-        return self.__base._request(
+        """
+        Args:
+            email (str):
+            email_grant_token (str):
+            password (str):
+            nickname (str):
+            birth_date (str):
+            gender (int, optional):
+            country_code (str, optional):
+            biography (str, optional):
+            prefecture (str, optional):
+            profile_icon_filename (str, optional):
+            cover_image_filename (str, optional):
+            en (int, optional):
+            vn (int, optional):
+
+        Returns:
+            CreateUserResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v3/users/register",
-            payload={
-                "app_version": Configs.API_VERSION_NAME,
-                "api_key": Configs.API_KEY,
+            config.API_HOST + "/v3/users/register",
+            json={
+                "app_version": config.API_VERSION_NAME,
+                "api_key": config.API_KEY,
                 "signed_version": sha256(),
                 "timestamp": int(datetime.now().timestamp()),
                 "signed_info": md5(
-                    self.__base.device_uuid, int(datetime.now().timestamp()), False
+                    self.__client.device_uuid, int(datetime.now().timestamp()), False
                 ),
-                "uuid": self.__base.uuid,
-                "nickname": nickname,
-                "birth_date": birth_date,
-                "gender": gender,
-                "country_code": country_code,
-                "biography": biography,
-                "prefecture": prefecture,
-                "profile_icon_filename": profile_icon_filename,
-                "cover_image_filename": cover_image_filename,
-                "email": email,
-                "password": password,
-                "email_grant_token": email_grant_token,
-                "en": en,
-                "vn": vn,
-            },
-            data_type=CreateUserResponse,
+                "uuid": self.__client.device_uuid,
+            }.update(params),
+            return_type=CreateUserResponse,
         )
 
-    def remove_user_avatar(self):
-        return self.__base._request("POST", route=f"/v2/users/remove_profile_photo")
+    async def delete_user_avatar(self) -> Response:
+        """ユーザーのアイコンを削除する
 
-    def remove_user_cover(self):
-        return self.__base._request("POST", route=f"/v2/users/remove_cover_image")
-
-    def report_user(
-        self,
-        user_id: int,
-        category_id: int,
-        reason: str = None,
-        screenshot_filename: str = None,
-        screenshot_2_filename: str = None,
-        screenshot_3_filename: str = None,
-        screenshot_4_filename: str = None,
-    ):
-        return self.__base._request(
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v3/users/{user_id}/report",
-            payload={
-                "category_id": category_id,
-                "reason": reason,
-                "screenshot_filename": screenshot_filename,
-                "screenshot_2_filename": screenshot_2_filename,
-                "screenshot_3_filename": screenshot_3_filename,
-                "screenshot_4_filename": screenshot_4_filename,
-            },
+            config.API_HOST + "/v2/users/remove_profile_photo",
+            return_type=Response,
         )
 
-    def reset_password(self, email: str, email_grant_token: str, password: str):
-        return self.__base._request(
+    async def delete_user_cover(self) -> Response:
+        """ユーザーのカバー画像を削除する
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + "/v2/users/remove_cover_image",
+            return_type=Response,
+        )
+
+    async def reset_password(self, **params) -> Response:
+        """パスワードをリセットする
+
+        Args:
+            email (str):
+            email_grant_token (str):
+            password (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "PUT",
-            route=f"/v1/users/reset_password",
-            payload={
-                "email": email,
-                "email_grant_token": email_grant_token,
-                "password": password,
-            },
+            config.API_HOST + "/v1/users/reset_password",
+            json=params,
+            return_type=Response,
         )
 
-    def search_lobi_users(self, **params) -> UsersResponse:
+    async def search_lobi_users(self, **params) -> UsersResponse:
+        """Lobiのユーザーを検索する
+
+        Args:
+            nickname (str, optional):
+            number (int, optional):
+            from_str (str, optional):
+
+        Returns:
+            UsersResponse:
         """
-
-        Parameters:
-        -----------
-
-            - nickname: str = None
-            - number: int = None
-            - from_str: str = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/lobi_friends",
+            config.API_HOST + "/v1/lobi_friends",
             params=params,
-            data_type=UsersResponse,
+            return_type=UsersResponse,
         )
 
-    def search_users(self, **params) -> UsersResponse:
+    async def search_users(self, **params) -> UsersResponse:
+        """ユーザーを検索する
+
+        Args:
+            gender (int, optional):
+            nickname (str, optional):
+            title (str, optional):
+            biography (str, optional):
+            from_timestamp (int, optional):
+            similar_age (bool, optional):
+            not_recent_gomimushi (bool, optional):
+            recently_created (bool, optional):
+            same_prefecture (bool, optional):
+            save_recent_search (bool, optional):
+
+        Returns:
+            UsersResponse:
         """
-
-        Parameters:
-        -----------
-
-            - gender: int = None
-            - nickname: str = None
-            - title: str = None
-            - biography: str = None
-            - from_timestamp: int = None
-            - similar_age: bool = None
-            - not_recent_gomimushi: bool = None
-            - recently_created: bool = None
-            - same_prefecture: bool = None
-            - save_recent_search: bool = None
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/web/users/search",
+            config.API_HOST + "/v1/web/users/search",
             params=params,
-            data_type=UsersResponse,
+            return_type=UsersResponse,
         )
 
-    def set_follow_permission_enabled(self, nickname: str, is_private: bool = None):
-        return self.__base._request(
+    async def set_follow_permission_enabled(self, **params) -> Response:
+        """フォローを許可制にするかを設定する
+
+        Args:
+            nickname (str):
+            is_private (bool, optional):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v2/users/edit",
-            payload={
-                "nickname": nickname,
-                "is_private": is_private,
-                "uuid": self.__base.uuid,
-                "api_key": Configs.API_KEY,
+            config.API_HOST + "/v2/users/edit",
+            json={
+                "uuid": self.__client.device_uuid,
+                "api_key": config.API_KEY,
                 "timestamp": int(datetime.now().timestamp()),
                 "signed_info": md5(
-                    self.__base.uuid, int(datetime.now().timestamp()), True
+                    self.__client.device_uuid, int(datetime.now().timestamp()), True
                 ),
                 "signed_version": sha256(),
-            },
+            }.update(params),
+            return_type=Response,
         )
 
-    def set_setting_follow_recommendation_enabled(self, on: bool):
-        return self.__base._request(
+    async def take_action_follow_request(self, user_id: int, action: str) -> Response:
+        """フォローリクエストを操作する
+
+        Args:
+            user_id (int):
+            action (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/users/visible_on_sns_friend_recommendation_setting",
-            params={"on": on},
+            config.API_HOST + f"/v2/users/{user_id}/follow_request",
+            json={"action": action},
+            return_type=Response,
         )
 
-    def take_action_follow_request(self, target_id: int, action: str):
-        return self.__base._request(
-            "POST",
-            route=f"/v2/users/{target_id}/follow_request",
-            payload={"action": action},
-        )
+    async def turn_on_hima(self) -> Response:
+        """ひまなうを有効にする
 
-    def turn_on_hima(self):
-        return self.__base._request(
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/users/hima",
+            config.API_HOST + "/v1/users/hima",
+            return_type=Response,
         )
 
-    def unfollow_user(self, user_id: int):
-        return self.__base._request("POST", route=f"/v2/users/{user_id}/unfollow")
+    async def unfollow_user(self, user_id: int) -> Response:
+        """ユーザーをアンフォローする
 
-    def update_language(self, language: str):
-        return self.__base._request(
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/users/language",
-            payload={
-                "uuid": self.__base.uuid,
-                "api_key": Configs.API_KEY,
-                "timestamp": int(datetime.now().timestamp()),
-                "signed_info": md5(
-                    self.__base.uuid, int(datetime.now().timestamp()), True
-                ),
-                "language": language,
-            },
+            config.API_HOST + f"/v2/users/{user_id}/unfollow",
+            return_type=Response,
         )
 
-    def update_user(self, nickname: str, **params):
+    async def update_user(self, nickname: str, **params) -> Response:
+        """プロフィールを更新する
+
+        Args:
+            nickname (str):
+            biography (str, optional):
+            prefecture (str, optional):
+            gender (int, optional):
+            country_code (str, optional):
+            profile_icon_filename (str, optional):
+            cover_image_filename (str, optional):
+            username (str, optional):
+
+        Returns:
+            Response:
         """
-
-        プロフィールを更新します
-
-        Parameters
-        ----------
-
-            - nickname: str = (required)
-            - biography: str = (optional)
-            - prefecture: str = (optional)
-            - gender: int = (optional)
-            - country_code: str = (optional)
-            - profile_icon_filename: str = (optional)
-            - cover_image_filename: str = (optional)
-            - username: str = (optional)
-
-        """
-        params.update(
-            {
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + "/v3/users/edit",
+            json={
                 "nickname": nickname,
-                "uuid": self.__base.uuid,
-                "api_key": Configs.API_KEY,
+                "uuid": self.__client.device_uuid,
+                "api_key": config.API_KEY,
                 "timestamp": int(datetime.now().timestamp()),
                 "signed_info": md5(
-                    self.__base.uuid, int(datetime.now().timestamp()), True
+                    self.__client.device_uuid, int(datetime.now().timestamp()), True
                 ),
-            }
-        )
-        return self.__base._request(
-            "POST",
-            route=f"/v3/users/edit",
-            payload=params,
+            }.update(params),
+            return_type=Response,
         )
 
     # BlockApi
 
-    def block_user(
+    async def block_user(
         self,
         user_id: int,
-    ):
-        return self.__base._request("POST", route=f"/v1/users/{user_id}/block")
+    ) -> Response:
+        """ユーザーをブロックする
 
-    def get_blocked_user_ids(self) -> BlockedUserIdsResponse:
-        return self.__base._request(
-            "GET",
-            route=f"/v1/users/block_ids",
-            data_type=BlockedUserIdsResponse,
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + f"/v1/users/{user_id}/block",
+            return_type=Response,
         )
 
-    def get_blocked_users(self, from_id: int = None) -> BlockedUsersResponse:
+    async def get_blocked_user_ids(self) -> BlockedUserIdsResponse:
+        """あなたをブロックしたユーザーを取得する
+
+        Returns:
+            BlockedUserIdsResponse:
+        """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + "/v1/users/block_ids",
+            return_type=BlockedUserIdsResponse,
+        )
+
+    async def get_blocked_users(self, **params) -> BlockedUsersResponse:
         # @Body @NotNull SearchUsersRequest searchUsersRequest
-        params = {}
-        if from_id:
-            params["from_id"] = from_id
-        return self.__base._request(
+        """ブロックしたユーザーを取得する
+
+        Args:
+            from_id (int, optional):
+
+        Returns:
+            BlockedUsersResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v2/users/blocked",
+            config.API_HOST + "/v2/users/blocked",
             params=params,
-            data_type=BlockedUsersResponse,
+            return_type=BlockedUsersResponse,
         )
 
-    def unblock_user(self, user_id: int):
-        return self.__base._request("POST", route=f"/v2/users/{user_id}/unblock")
+    async def unblock_user(self, user_id: int) -> Response:
+        """ユーザーをアンブロックする
+
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + f"/v2/users/{user_id}/unblock",
+            return_type=Response,
+        )
 
     # HiddenApi
 
-    def get_hidden_users_list(self, **params) -> HiddenResponse:
+    async def get_hidden_users_list(self, **params) -> HiddenResponse:
+        """非表示のユーザー一覧を取得する
+
+        Args:
+            from_str (str, optional):
+            number (int, optional):
+
+        Returns:
+            HiddenResponse:
         """
-
-        Parameters:
-        -----------
-
-            - from: str = None
-            - number: int = None
-
-        """
-        return self.__base._request(
+        params["from"] = params.get("from_str")
+        return await self.__client.request(
             "GET",
-            route=f"/v1/hidden/users",
+            config.API_HOST + "/v1/hidden/users",
             params=params,
-            data_type=HiddenResponse,
+            return_type=HiddenResponse,
         )
 
-    def hide_user(self, user_id: int):
-        return self.__base._request(
+    async def hide_user(self, user_id: int) -> Response:
+        """ユーザーを非表示にする
+
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/hidden/users",
-            payload={"user_id": user_id},
+            config.API_HOST + "/v1/hidden/users",
+            json={"user_id": user_id},
+            return_type=Response,
         )
 
-    def unhide_users(self, user_ids: list[int]):
-        return self.__base._request(
+    async def unhide_users(self, user_ids: List[int]) -> Response:
+        """ユーザーの非表示を解除する
+
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/hidden/users",
+            config.API_HOST + "/v1/hidden/users",
             params={"user_ids[]": user_ids},
+            return_type=Response,
         )

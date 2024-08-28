@@ -22,230 +22,339 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
+from typing import List
 
-from .. import client
+from .. import config
 from ..responses import (
     BgmsResponse,
+    CallActionSignatureResponse,
     CallStatusResponse,
     ConferenceCallResponse,
     GamesResponse,
     GenresResponse,
     PostResponse,
     PostsResponse,
+    Response,
     UsersByTimestampResponse,
 )
 
 
-class CallAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+class CallApi:
+    """通話 API"""
 
-    def bump_call(self, call_id: int, participant_limit: int = None):
-        params = {}
-        if participant_limit:
-            params["participant_limit"] = participant_limit
-        return self.__base._request(
-            "POST", route=f"/v1/calls/{call_id}/bump", params=params
-        )
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
 
-    def get_user_active_call(self, user_id: int) -> PostResponse:
-        return self.__base._request(
+        self.__client: Client = client
+
+    async def get_user_active_call(self, user_id: int) -> PostResponse:
+        """ユーザーが参加中の通話を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            PostResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/posts/active_call",
+            config.API_HOST + "/v1/posts/active_call",
             params={"user_id": user_id},
-            data_type=PostResponse,
+            return_type=PostResponse,
         )
 
-    def get_bgms(self) -> BgmsResponse:
-        return self.__base._request(
-            "GET", route="/v1/calls/bgm", data_type=BgmsResponse
-        )
+    async def get_bgms(self) -> BgmsResponse:
+        """通話のBGMを取得する
 
-    def get_call(self, call_id: int) -> ConferenceCallResponse:
-        return self.__base._request(
+        Returns:
+            BgmsResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/calls/conferences/{call_id}",
-            data_type=ConferenceCallResponse,
+            config.API_HOST + "/v1/calls/bgm",
+            return_type=BgmsResponse,
         )
 
-    def get_call_invitable_users(
-        self, call_id: int, from_timestamp: int = None
+    async def get_call(self, call_id: int) -> ConferenceCallResponse:
+        """通話を取得する
+
+        Args:
+            call_id (int):
+
+        Returns:
+            ConferenceCallResponse:
+        """
+        return await self.__client.request(
+            "GET",
+            config.API_HOST + f"/v1/calls/conferences/{call_id}",
+            return_type=ConferenceCallResponse,
+        )
+
+    async def get_call_invitable_users(
+        self, call_id: int, **params
     ) -> UsersByTimestampResponse:
+        """通話に招待可能なユーザーを取得する
+
+        Args:
+            call_id (int):
+            from_timestamp (int, optional):
+
+        Returns:
+            UsersByTimestampResponse:
+        """
         # @Nullable @Query("user[nickname]")
-        params = {}
-        if from_timestamp:
-            params["from_timestamp"] = from_timestamp
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/calls/{call_id}/users/invitable",
+            config.API_HOST + f"/v1/calls/{call_id}/users/invitable",
             params=params,
-            data_type=UsersByTimestampResponse,
+            return_type=UsersByTimestampResponse,
         )
 
-    def get_call_status(self, opponent_id: int) -> CallStatusResponse:
-        return self.__base._request(
+    async def get_call_status(self, opponent_id: int) -> CallStatusResponse:
+        """通話の状態を取得します
+
+        Args:
+            opponent_id (int):
+
+        Returns:
+            CallStatusResponse:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/calls/phone_status/{opponent_id}",
-            data_type=CallStatusResponse,
+            config.API_HOST + f"/v1/calls/phone_status/{opponent_id}",
+            return_type=CallStatusResponse,
         )
 
-    def get_games(self, **params) -> GamesResponse:
-        """
+    async def get_games(self, **params) -> GamesResponse:
+        """通話に設定可能なゲームを取得する
 
-        Parameters
-        ----------
-            - number: int - (optional)
-            - ids: list[int] - (optional)
-            - from_id: int - (optional)
+        Args:
+            number (int, optional):
+            ids (List[int], optional):
+            from_id (int, optional):
 
+        Returns:
+            GamesResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/games/apps",
+            config.API_HOST + "/v1/games/apps",
             params=params,
-            data_type=GamesResponse,
+            return_type=GamesResponse,
         )
 
-    def get_genres(self, **params) -> GenresResponse:
-        """
+    async def get_genres(self, **params) -> GenresResponse:
+        """通話のジャンルを取得する
 
-        Parameters
-        ----------
-            - number: int - (optional)
-            - from: int - (optional)
+        Args:
+            number (int, optional):
+            from (int, optional):
 
+        Returns:
+            GenresResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/genres",
+            config.API_HOST + "/v1/genres",
             params=params,
-            data_type=GenresResponse,
+            return_type=GenresResponse,
         )
 
-    def get_group_calls(self, **params) -> PostsResponse:
-        """
+    async def get_group_calls(self, **params) -> PostsResponse:
+        """サークル内の通話を取得する
 
-        Parameters
-        ----------
-            - number: int - (optional)
-            - group_category_id: int - (optional)
-            - from_timestamp: int - (optional)
-            - scope: str - (optional)
+        Args:
+            number (int, optional):
+            group_category_id (int, optional):
+            from_timestamp (int, optional):
+            scope (str, optional):
 
+        Returns:
+            PostsResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route="/v1/posts/group_calls",
+            config.API_HOST + "/v1/posts/group_calls",
             params=params,
-            data_type=PostsResponse,
+            return_type=PostsResponse,
         )
 
-    def invite_to_call_bulk(self, call_id: int, group_id: int = None):
-        """
+    async def invite_online_followings_to_call(
+        self, call_id: int, **params
+    ) -> Response:
+        """オンラインの友達をまとめて通話に招待します
 
-        Parameters
-        ----------
-            - call_id: int - (required)
-            - group_id: int - (optional)
+        Args:
+            call_id (int, optional):
+            group_id (str, optional):
 
+        Returns:
+            Response:
         """
-        params = {}
-        if group_id:
-            params["group_id"] = group_id
-        return self.__base._request(
+        return await self.__client.request(
             "POST",
-            route=f"/v1/calls/{call_id}/bulk_invite",
+            config.API_HOST + f"/v1/calls/{call_id}/bulk_invite",
             params=params,
+            return_type=Response,
         )
 
-    def invite_users_to_call(self, call_id: int, user_ids: list[int]):
-        """
+    async def invite_users_to_call(self, call_id: int, user_ids: List[int]) -> Response:
+        """通話に複数のユーザーを招待する
 
-        Parameters
-        ----------
-            - call_id: int - (required)
-            - user_ids: list[int] - (required)
+        Args:
+            call_id (int):
+            user_ids (List[int]):
 
+        Returns:
+            Response:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "POST",
-            route=f"/v1/calls/conference_calls/{call_id}/invite",
+            config.API_HOST + f"/v1/calls/conference_calls/{call_id}/invite",
             payload={"call_id": call_id, "user_ids": user_ids},
+            return_type=Response,
         )
 
-    def invite_users_to_chat_call(self, chat_room_id: int, room_id: int, room_url: str):
-        return self.__base._request(
+    async def invite_users_to_chat_call(self, **params) -> Response:
+        """ユーザーをチャット通話に招待する
+
+        Args:
+            chat_room_id (int):
+            room_id (int):
+            room_url (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route="/v2/calls/invite",
-            payload={
-                "chat_room_id": chat_room_id,
-                "room_id": room_id,
-                "room_url": room_url,
-            },
+            config.API_HOST + "/v2/calls/invite",
+            payload=params,
+            return_type=Response,
         )
 
-    def kick_and_ban_from_call(self, call_id: int, user_id: int):
-        return self.__base._request(
+    async def kick_user_from_call(
+        self, call_id: int, **params
+    ) -> CallActionSignatureResponse:
+        """ユーザーを通話からキックする
+
+        Args:
+            call_id (int):
+            uuid (int):
+            ban (bool):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/calls/conference_calls/{call_id}/kick",
-            payload={"user_id": user_id},
+            config.API_HOST + f"/v3/calls/conference_calls/{call_id}/kick",
+            payload=params,
+            return_type=CallActionSignatureResponse,
         )
 
-    def set_call(
-        self,
-        call_id: int,
-        joinable_by: str,
-        game_title: str = None,
-        category_id: str = None,
-    ):
-        return self.__base._request(
+    async def start_call(self, call_id: int, **params) -> Response:
+        """通話を開始する
+
+        Args:
+            call_id (int):
+            joinable_by (str):
+            game_title (str, optional):
+            category_id (str, optional):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "PUT",
-            route=f"/v1/calls/{call_id}",
-            payload={
-                "joinable_by": joinable_by,
-                "game_title": game_title,
-                "category_id": category_id,
-            },
+            config.API_HOST + f"/v1/calls/{call_id}",
+            payload=params,
+            return_type=Response,
         )
 
-    def set_user_role(self, call_id: int, user_id: int, role: str):
-        return self.__base._request(
+    async def set_user_role(self, call_id: int, user_id: int, role: str) -> Response:
+        """通話の参加者に役職を付与する
+
+        Args:
+            call_id (int):
+            user_id (int):
+            role (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "PUT",
-            route=f"/v1/calls/{call_id}/users/{user_id}",
+            config.API_HOST + f"/v1/calls/{call_id}/users/{user_id}",
             payload={"role": role},
+            return_type=Response,
         )
 
-    def start_call(
-        self, conference_id: int, call_sid: str = None
-    ) -> ConferenceCallResponse:
-        return self.__base._request(
+    async def join_call(self, **params) -> ConferenceCallResponse:
+        """通話に参加する
+
+        Args:
+            conference_id (int):
+            call_sid (str, optional):
+
+        Returns:
+            ConferenceCallResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route="/v1/calls/start_conference_call",
-            payload={"conference_id": conference_id, "call_sid": call_sid},
-            data_type=ConferenceCallResponse,
+            config.API_HOST + "/v1/calls/start_conference_call",
+            payload=params,
+            return_type=ConferenceCallResponse,
         )
 
-    def start_anonymous_call(
-        self, conference_id: int, agora_uid: str
-    ) -> ConferenceCallResponse:
-        return self.__base._request(
+    async def leave_call(self, **params) -> Response:
+        """通話から退出する
+
+        Args:
+            conference_id (int):
+            call_sid (str, optional):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "POST",
-            route="/v1/anonymous_calls/start_conference_call",
-            payload={"conference_id": conference_id, "agora_uid": agora_uid},
-            data_type=ConferenceCallResponse,
+            config.API_HOST + "/v1/calls/leave_conference_call",
+            payload=params,
+            return_type=Response,
         )
 
-    def stop_anonymous_call(self, conference_id: int, agora_uid: str = None):
-        return self.__base._request(
+    async def join_call_as_anonymous(self, **params) -> ConferenceCallResponse:
+        """匿名で通話に参加する
+
+        Args:
+            conference_id (int):
+            agora_uid (str):
+
+        Returns:
+            ConferenceCallResponse:
+        """
+        return await self.__client.request(
             "POST",
-            route="/v1/anonymous_calls/leave_conference_call",
-            payload={"conference_id": conference_id, "agora_uid": agora_uid},
+            config.API_HOST + "/v1/anonymous_calls/start_conference_call",
+            payload=params,
+            return_type=ConferenceCallResponse,
         )
 
-    def stop_call(self, conference_id: int, call_sid: str = None):
-        return self.__base._request(
+    async def leave_call_as_anonymous(self, **params) -> Response:
+        """匿名で参加した通話を退出する
+
+        Args:
+            conference_id (int):
+            agora_uid (str, optional):
+
+        Returns:
+            Response: _description_
+        """
+        return await self.__client.request(
             "POST",
-            route="/v1/calls/leave_conference_call",
-            payload={"conference_id": conference_id, "call_sid": call_sid},
+            config.API_HOST + "/v1/anonymous_calls/leave_conference_call",
+            payload=params,
+            return_type=Response,
         )

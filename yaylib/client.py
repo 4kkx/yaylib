@@ -22,142 +22,194 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
-
-import os
-import time
-import random
+import asyncio
 import logging
-
+import os
+import random
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Dict, List, Optional
 
-import httpx
-from httpx._types import TimeoutTypes
-
-from .api.auth import AuthAPI
-from .api.call import CallAPI
-from .api.chat import ChatAPI
-from .api.group import GroupAPI
-from .api.misc import MiscAPI
-from .api.notification import NotificationAPI
-from .api.post import PostAPI
-from .api.review import ReviewAPI
-from .api.thread import ThreadAPI
-from .api.user import UserAPI
+import aiohttp
 
 from . import __version__
-from . import ws
-from .config import Configs
-from .cookie import Cookie, CookieManager
+from .api.auth import AuthApi
+from .api.call import CallApi
+from .api.chat import ChatApi
+from .api.group import GroupApi
+from .api.misc import MiscApi
+from .api.notification import NotificationApi
+from .api.post import PostApi
+from .api.review import ReviewApi
+from .api.thread import ThreadApi
+from .api.user import UserApi
+from .config import API_HOST, API_VERSION_NAME
+from .device import Device
 from .errors import (
-    HTTPError,
-    BadRequestError,
-    AuthenticationError,
-    ForbiddenError,
-    NotFoundError,
-    RateLimitError,
-    YayServerError,
-    ErrorCode,
-    ErrorMessage,
+    AccessTokenExpiredError,
+    AccessTokenInvalidError,
+    HTTPInternalServerError,
+    QuotaLimitExceededError,
+    TooManyRequestsError,
+    UnauthorizedError,
+    raise_for_code,
+    raise_for_status,
 )
-from .models import (
-    ApplicationConfig,
-    Attachment,
-    BanWord,
-    Bgm,
-    ChatRoom,
-    ConferenceCall,
-    CreateGroupQuota,
-    Footprint,
-    GifImageCategory,
-    Group,
-    Message,
-    Post,
-    PresignedUrl,
-    PopularWord,
-    SharedUrl,
-    StickerPack,
-    Survey,
-    ThreadInfo,
-    User,
-    UserWrapper,
-)
+from .models import Attachment, CreateGroupQuota, Model, Post, SharedUrl, ThreadInfo
 from .responses import (
     ActiveFollowingsResponse,
     ActivitiesResponse,
+    ApplicationConfigResponse,
+    BanWordsResponse,
+    BgmsResponse,
     BlockedUserIdsResponse,
     BlockedUsersResponse,
     BookmarkPostResponse,
+    CallActionSignatureResponse,
     CallStatusResponse,
+    ChatRoomResponse,
     ChatRoomsResponse,
-    CreateGroupResponse,
+    ConferenceCallResponse,
     CreateChatRoomResponse,
+    CreateGroupResponse,
+    CreatePostResponse,
+    CreateUserResponse,
+    EmailGrantTokenResponse,
+    EmailVerificationPresignedUrlResponse,
     FollowRecommendationsResponse,
+    FollowRequestCountResponse,
     FollowUsersResponse,
+    FootprintsResponse,
     GamesResponse,
     GenresResponse,
+    GifsDataResponse,
     GroupCategoriesResponse,
+    GroupResponse,
     GroupsRelatedResponse,
     GroupsResponse,
     GroupThreadListResponse,
     GroupUserResponse,
     GroupUsersResponse,
     HiddenResponse,
-    LoginUserResponse,
-    LoginUpdateResponse,
-    MessageResponse,
-    PolicyAgreementsResponse,
-    PostsResponse,
-    PostLikersResponse,
-    PostTagsResponse,
+    HimaUsersResponse,
+    IdCheckerPresignedUrlResponse,
     LikePostsResponse,
+    LoginUpdateResponse,
+    LoginUserResponse,
+    MessageResponse,
+    MessagesResponse,
+    PolicyAgreementsResponse,
+    PopularWordsResponse,
+    PostLikersResponse,
+    PostResponse,
+    PostsResponse,
+    PostTagsResponse,
+    PresignedUrlResponse,
+    PresignedUrlsResponse,
+    RankingUsersResponse,
     RefreshCounterRequestsResponse,
-    RegisterDeviceTokenResponse,
+    Response,
     ReviewsResponse,
     SocialShareUsersResponse,
+    StickerPacksResponse,
     TokenResponse,
+    TotalChatRequestResponse,
     UnreadStatusResponse,
     UserResponse,
-    UsersResponse,
-    RankingUsersResponse,
     UsersByTimestampResponse,
+    UsersResponse,
     UserTimestampResponse,
+    VoteSurveyResponse,
+    WebSocketTokenResponse,
 )
-from .types import PolicyType
-from .utils import Colors, generate_jwt
-
-try:
-    from json.decoder import JSONDecodeError
-except ImportError:
-    JSONDecodeError = ValueError
-
+from .state import LocalUser, State
+from .utils import CustomFormatter, filter_dict, generate_jwt
+from .ws import Intents, WebSocketInteractor
 
 __all__ = ["Client"]
 
 
-class HeaderInterceptor(object):
-    def __init__(self, cookie: CookieManager, locale: str = "ja") -> None:
-        self.__locale: str = locale
-        self.__host: str = Configs.PRODUCTION_HOST
-        self.__user_agent: str = Configs.USER_AGENT
-        self.__device_info: str = Configs.DEVICE_INFO
-        self.__app_version: str = Configs.API_VERSION_NAME
-        self.__cookie: CookieManager = cookie
-        self.__client_ip: str = ""
-        self.__connection_speed: str = ""
-        self.__connection_type: str = "wifi"
-        self.__content_type: str = "application/json;charset=UTF-8"
+class RateLimit:
+    """レート制限を管理するクラス"""
 
-    def intercept(self, jwt_required: bool = False) -> Dict[str, str]:
-        cookie: Cookie = self.__cookie.get()
-        headers: dict = {
+    def __init__(self, wait_on_ratelimit: bool, max_retries: int) -> None:
+        self.__wait_on_ratelimit = wait_on_ratelimit
+        self.__max_retries = max_retries
+        self.__retries_performed = 0
+        self.__retry_after = 60 * 5
+
+    @property
+    def retries_performed(self) -> int:
+        """レート制限によるリトライ回数
+
+        Returns:
+            int: リトライ回数
+        """
+        return self.__retries_performed
+
+    @property
+    def max_retries(self) -> int:
+        """レート制限によるリトライ回数の上限
+
+        Returns:
+            int: リトライ回数の上限
+        """
+        return self.__max_retries
+
+    def __max_retries_reached(self) -> bool:
+        """リトライ回数上限に達したか否か"""
+        return not self.__wait_on_ratelimit or (
+            self.__retries_performed >= self.__max_retries
+        )
+
+    def reset(self) -> None:
+        """レート制限をリセットする"""
+        self.__retries_performed = 0
+
+    async def wait(self, err: Exception) -> None:
+        """レート制限が解除されるまで待機する
+
+        Raises:
+            Exception: リトライ回数の上限でスロー
+        """
+        if not self.__wait_on_ratelimit or self.__max_retries_reached():
+            raise err
+        await asyncio.sleep(self.__retry_after)
+        self.__retries_performed += 1
+
+
+class HeaderManager:
+    """HTTP ヘッダーのマネージャークラス"""
+
+    def __init__(self, device: Device, state: State, locale="ja") -> None:
+        self.__state = state
+        self.__locale = locale
+        self.__host = API_HOST
+        self.__user_agent = device.get_user_agent()
+        self.__device_info = device.get_device_info()
+        self.__app_version = API_VERSION_NAME
+        self.__client_ip = ""
+        self.__connection_speed = "0 kbps"
+        self.__connection_type = "wifi"
+        self.__content_type = "application/json;charset=UTF-8"
+
+    @property
+    def client_ip(self) -> str:
+        """クライアント IP アドレス"""
+        return self.__client_ip
+
+    @client_ip.setter
+    def client_ip(self, value: str) -> None:
+        self.__client_ip = value
+
+    def generate(self, jwt_required=False) -> Dict[str, str]:
+        """HTTPヘッダーを生成する"""
+        headers = {
             "Host": self.__host,
             "User-Agent": self.__user_agent,
             "X-Timestamp": str(int(datetime.now().timestamp())),
             "X-App-Version": self.__app_version,
             "X-Device-Info": self.__device_info,
-            "X-Device-UUID": cookie.device.device_uuid,
+            "X-Device-UUID": self.__state.device_uuid,
             "X-Client-IP": self.__client_ip,
             "X-Connection-Type": self.__connection_type,
             "X-Connection-Speed": self.__connection_speed,
@@ -168,363 +220,107 @@ class HeaderInterceptor(object):
         if jwt_required:
             headers.update({"X-Jwt": generate_jwt()})
 
-        if len(self.__client_ip):
+        if self.__client_ip != "":
             headers.update({"X-Client-IP": self.__client_ip})
 
-        if len(cookie.authentication.access_token):
-            headers.update(
-                {"Authorization": "Bearer " + cookie.authentication.access_token}
-            )
+        if self.__state.access_token != "":
+            headers.update({"Authorization": "Bearer " + self.__state.access_token})
 
         return headers
-
-    def get_client_ip(self) -> str:
-        return self.__client_ip
-
-    def get_connection_speed(self) -> str:
-        return self.__connection_speed
-
-    def set_client_ip(self, client_ip: str) -> None:
-        self.__client_ip = client_ip
-
-    def set_connection_speed(self, connection_speed: str) -> None:
-        self.__connection_speed = connection_speed
 
 
 current_path = os.path.abspath(os.getcwd())
 
 
-class BaseClient(ws.WebSocketInteractor):
+# pylint: disable=too-many-public-methods
+class Client(WebSocketInteractor):
+    """yaylib のエントリーポイント"""
+
     def __init__(
         self,
         *,
-        intents: Optional[ws.Intents] = None,
+        intents: Optional[Intents] = None,
         proxy_url: Optional[str] = None,
-        max_retries: int = 3,
-        backoff_factor: float = 1.5,
-        wait_on_ratelimit: bool = True,
-        min_delay: float = 0.3,
-        max_delay: float = 1.2,
-        timeout: TimeoutTypes = 30,
-        err_lang: str = "ja",
-        base_path: str = current_path + "/config/",
-        save_cookie_file: bool = True,
-        cookie_password: Optional[str] = None,
-        cookie_filename: str = "cookies",
-        loglevel: int = logging.INFO,
+        timeout=30,
+        max_retries=3,
+        backoff_factor=1.5,
+        wait_on_ratelimit=True,
+        max_ratelimit_retries=15,
+        min_delay=0.3,
+        max_delay=1.2,
+        base_path=current_path + "/.config/",
+        state: Optional[State] = None,
+        loglevel=logging.INFO,
     ) -> None:
         super().__init__(self, intents)
 
-        self.__max_retries: int = max_retries
-        self.__backoff_factor: float = backoff_factor
-        self.__wait_on_ratelimit: bool = wait_on_ratelimit
-        self.__last_request_timestamp: int = 0
-        self.__min_delay: float = min_delay
-        self.__max_delay: float = max_delay
-        self.__err_lang: str = err_lang
-        self.__save_cookie_file: bool = save_cookie_file
+        self.__proxy_url = proxy_url
+        self.__timeout = timeout
+        self.__session = None
+        self.__min_delay = min_delay
+        self.__max_delay = max_delay
+        self.__last_request_ts = 0
+        self.__max_retries = max_retries
+        self.__backoff_factor = backoff_factor
 
-        self.__cookie: CookieManager = CookieManager(
-            save_cookie_file,
-            base_path + cookie_filename + ".json",
-            cookie_password,
-        )
-
-        self.__header_interceptor: HeaderInterceptor = HeaderInterceptor(self.__cookie)
-        self.__header_interceptor.set_connection_speed("0 kbps")
-
-        self.__session: httpx.Client = httpx.Client(
-            headers=self.__header_interceptor.intercept(),
-            http2=True,
-            proxies=proxy_url,
-            timeout=timeout,
-        )
-
-        self.AuthAPI: AuthAPI = AuthAPI(self)
-        self.CallAPI: CallAPI = CallAPI(self)
-        self.ChatAPI: ChatAPI = ChatAPI(self)
-        self.GroupAPI: GroupAPI = GroupAPI(self)
-        self.MiscAPI: MiscAPI = MiscAPI(self)
-        self.NotificationAPI: NotificationAPI = NotificationAPI(self)
-        self.PostAPI: PostAPI = PostAPI(self)
-        self.ReviewAPI: ReviewAPI = ReviewAPI(self)
-        self.ThreadAPI: ThreadAPI = ThreadAPI(self)
-        self.UserAPI: UserAPI = UserAPI(self)
-
-        self.logger: logging.Logger = logging.getLogger(
-            "yaylib version: " + __version__
-        )
+        self.auth = AuthApi(self)
+        self.call = CallApi(self)
+        self.chat = ChatApi(self)
+        self.group = GroupApi(self)
+        self.misc = MiscApi(self)
+        self.notification = NotificationApi(self)
+        self.post = PostApi(self)
+        self.review = ReviewApi(self)
+        self.thread = ThreadApi(self)
+        self.user = UserApi(self)
 
         if not os.path.exists(base_path):
             os.makedirs(base_path)
 
-        ch: logging.StreamHandler = logging.StreamHandler()
+        self.__state = state or State(storage_path=base_path + "secret.db")
+        self.__header_manager = HeaderManager(Device.create(), self.__state)
+        self.__ratelimit = RateLimit(wait_on_ratelimit, max_ratelimit_retries)
+
+        self.logger = logging.getLogger("yaylib version: " + __version__)
+
+        ch = logging.StreamHandler()
         ch.setLevel(loglevel)
-        ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+        ch.setFormatter(CustomFormatter())
 
         self.logger.addHandler(ch)
         self.logger.setLevel(logging.DEBUG)
 
-        self.logger.info("yaylib version: " + __version__ + " started.")
+        self.logger.info("yaylib version: %s started.", __version__)
 
     @property
-    def cookie(self) -> Cookie:
-        return self.__cookie.get()
+    def state(self) -> State:
+        """状態管理オブジェクト"""
+        return self.__state
 
     @property
     def user_id(self) -> int:
-        return self.cookie.user.user_id
+        """ログインしているユーザーの識別子"""
+        return self.__state.user_id
 
     @property
     def access_token(self) -> str:
-        return self.cookie.authentication.access_token
+        """アクセストークン"""
+        return self.__state.access_token
 
     @property
     def refresh_token(self) -> str:
-        return self.cookie.authentication.refresh_token
-
-    @property
-    def uuid(self) -> str:
-        return self.cookie.user.uuid
+        """リフレッシュトークン"""
+        return self.__state.refresh_token
 
     @property
     def device_uuid(self) -> str:
-        return self.cookie.device.device_uuid
-
-    def __make_request(
-        self,
-        method: str,
-        base_url: str,
-        route: str,
-        params: Optional[Dict[str, Any]] = None,
-        payload: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
-        jwt_required: bool = False,
-        bypass_delay: bool = False,
-    ) -> dict | str:
-        endpoint = route
-        if base_url is not None:
-            endpoint: str = "https://" + base_url + route
-
-        params: Optional[Dict[str, Any]] = self.__filter_params(params)
-        payload: Optional[Dict[str, Any]] = self.__filter_params(payload)
-
-        # set client ip address to request header if not exists
-        if (
-            not self.__header_interceptor.get_client_ip()
-            and "v2/users/timestamp" not in endpoint
-        ):
-            response = self.UserAPI.get_timestamp()
-            self.__header_interceptor.set_client_ip(response.ip_address)
-
-        response = None
-        backoff_duration: int = 0
-        # roughly equivalent to 60 mins, plus extra 15 mins
-        max_ratelimit_retries: int = 15
-        auth_retry_count, max_auth_retries = 0, 2
-
-        # retry the request based on max_retries
-        for i in range(self.__max_retries):
-            time.sleep(backoff_duration)
-
-            if headers is None:
-                headers = {}
-            headers.update(self.__header_interceptor.intercept(jwt_required))
-
-            self.__log_request(method, endpoint, params, headers, payload)
-
-            response = self.__session.request(
-                method, endpoint, params=params, json=payload, headers=headers
-            )
-
-            if (
-                self.__last_request_timestamp
-                and int(datetime.now().timestamp()) - self.__last_request_timestamp < 1
-            ):
-                # insert delay if time between requests is less than 1 second
-                sleep_time = random.uniform(self.__min_delay, self.__max_delay)
-                time.sleep(sleep_time)
-
-            self.__log_response(response)
-
-            if self.__wait_on_ratelimit and self.__is_ratelimit_error(response):
-                # continue attempting request until successful
-                # or maximum number of retries is reached
-                retries_performed: int = 0
-
-                while retries_performed <= max_ratelimit_retries:
-                    retry_after: int = 60 * 5
-
-                    self.logger.warn(
-                        f"Rate limit reached. Sleeping for: {retry_after} sec..."
-                    )
-                    time.sleep(retry_after + 1)
-
-                    headers.update(self.__header_interceptor.intercept())
-
-                    self.__log_request(method, endpoint, params, headers, payload)
-
-                    response = self.__session.request(
-                        method, endpoint, params=params, json=payload, headers=headers
-                    )
-
-                    self.__log_response(response)
-
-                    if not self.__is_ratelimit_error(response):
-                        break
-
-                    retries_performed += 1
-
-                if retries_performed >= max_ratelimit_retries:
-                    raise RateLimitError("Maximum rate limit reached.")
-
-            if self.__save_cookie_file and self.__is_access_token_expired_error(
-                response
-            ):
-                # remove the cookie file and stop
-                # the proccessing if refresh token has expired
-                if "/api/v1/oauth/token" in endpoint:
-                    self.__cookie.destroy()
-                    raise AuthenticationError(
-                        "Refresh token expired. Try logging in again."
-                    )
-
-                auth_retry_count += 1
-
-                if auth_retry_count < max_auth_retries:
-                    if self.user_id == 0:
-                        raise AuthenticationError(
-                            "Please log in to perform the action."
-                        )
-                    self.__refresh_tokens()
-                    continue
-                else:
-                    self.__cookie.destroy()
-                    raise AuthenticationError(
-                        "Maximum authentication retries exceeded. Try logging in again."
-                    )
-
-            if response.status_code not in [500, 502, 503, 504]:
-                break
-
-            if response is not None:
-                self.logger.error(
-                    f"Request failed with status code {response.status_code}. Retrying...",
-                    exc_info=True,
-                )
-            else:
-                self.logger.error("Request failed. Retrying...")
-
-            backoff_duration = self.__backoff_factor * (2**i)
-
-        self.__last_request_timestamp = 0
-        if not bypass_delay:
-            self.__last_request_timestamp = int(datetime.now().timestamp())
-
-        try:
-            f_response = response.json()
-        except JSONDecodeError:
-            f_response = response.text
-
-        if isinstance(f_response, dict):
-            f_response = self.__translate_error_message(f_response)
-
-        if response.status_code == 400:
-            raise BadRequestError(f_response)
-        if response.status_code == 401:
-            raise AuthenticationError(f_response)
-        if response.status_code == 403:
-            raise ForbiddenError(f_response)
-        if response.status_code == 404:
-            raise NotFoundError(f_response)
-        if response.status_code == 429:
-            raise RateLimitError(f_response)
-        if response.status_code == 500:
-            raise YayServerError(f_response)
-        if response.status_code and not 200 <= response.status_code < 300:
-            raise HTTPError(f_response)
-
-        return f_response
-
-    def __log_request(
-        self, method: str, endpoint: str, params: dict, headers: dict, payload: dict
-    ):
-        self.logger.debug(
-            f"{Colors.HEADER}Making API request: {method} {endpoint}{Colors.RESET}\n\n"
-            f"Parameters: {params}\n\n"
-            f"Headers: {headers}\n\n"
-            f"Body: {payload}\n"
-        )
-
-    def __log_response(self, response: httpx.Response):
-        self.logger.debug(
-            f"Received API response:\n\n"
-            f"Status code: {response.status_code}\n\n"
-            f"Headers: {response.headers}\n\n"
-            f"Response: {response.text}\n"
-        )
-
-    def __filter_params(
-        self, params: Optional[Dict[str, Any]] = None
-    ) -> Optional[Dict[str, Any]]:
-        if params is None:
-            return None
-        new_params = {}
-        for k in params:
-            if params[k] is not None:
-                new_params[k] = params[k]
-        return new_params
-
-    def __is_access_token_expired_error(self, response: httpx.Response) -> bool:
-        json_response: dict = response.json()
-        return response.status_code == 401 and (
-            json_response.get("error_code") == ErrorCode.AccessTokenExpired.value
-            or json_response.get("error_code") == ErrorCode.AccessTokenInvalid.value
-        )
-
-    def __is_ratelimit_error(self, response: httpx.Response) -> bool:
-        if response.status_code == 429:
-            return True
-        if response.status_code == 400:
-            json_response: dict = response.json()
-            if json_response.get("error_code") == ErrorCode.QuotaLimitExceeded.value:
-                return True
-        return False
-
-    def __refresh_tokens(self) -> None:
-        response: TokenResponse = self.AuthAPI.get_token(
-            grant_type="refresh_token", refresh_token=self.refresh_token
-        )
-        self.__cookie.set(
-            Cookie(
-                {
-                    **self.cookie.to_dict(),
-                    "authentication": {
-                        "access_token": response.access_token,
-                        "refresh_token": response.refresh_token,
-                    },
-                }
-            )
-        )
-        self.__cookie.save()
-
-    def __translate_error_message(self, f_response: dict) -> dict:
-        if not self.__err_lang == "ja":
-            return f_response
-        try:
-            error_code = f_response.get("error_code")
-            if error_code is not None:
-                error_type = ErrorCode(error_code)
-                if error_type.name in ErrorMessage.__members__:
-                    error_message = ErrorMessage[error_type.name].value
-                    f_response["message"] = error_message
-            return f_response
-        except ValueError:
-            return f_response
+        """デバイスの識別子"""
+        return self.__state.device_uuid
 
     def __construct_response(
-        self, response: dict, data_type: Optional[object] = None
-    ) -> dict:
+        self, response: Optional[dict], data_type: Optional[Model] = None
+    ) -> Optional[dict | Model]:
+        """辞書型レスポンスからモデルを生成する"""
         if data_type is not None:
             if isinstance(response, list):
                 response = [data_type(result) for result in response]
@@ -532,2270 +328,2210 @@ class BaseClient(ws.WebSocketInteractor):
                 response = data_type(response)
         return response
 
-    def _request(
-        self,
-        method: str,
-        route: str,
-        base_url: str = Configs.PRODUCTION_HOST,
-        params: Optional[Dict[str, Any]] = None,
-        payload: Optional[Dict[str, Any]] = None,
-        data_type: Optional[object] = None,
-        headers: Optional[Dict[str, Any]] = None,
-        jwt_required: bool = False,
-        bypass_delay: bool = False,
-    ) -> object | dict:
-        res: dict | str = self.__make_request(
-            method=method,
-            base_url=base_url,
-            route=route,
-            params=params,
-            payload=payload,
-            headers=headers,
-            jwt_required=jwt_required,
-            bypass_delay=bypass_delay,
+    async def base_request(
+        self, method: str, url: str, **kwargs
+    ) -> aiohttp.ClientResponse:
+        """共通の基底リクエストを行う"""
+        self.logger.debug(
+            "Making API request: [%s] %s\n\nParameters: %s\n\nHeaders: %s\n\nBody: %s\n",
+            method,
+            url,
+            kwargs.get("params"),
+            kwargs.get("headers"),
+            kwargs.get("json"),
         )
-        if data_type:
-            return self.__construct_response(res, data_type)
-        return res
 
-    def _prepare(self, email: str, password: str) -> LoginUserResponse:
-        try:
-            self.__cookie.load(email)
-            return LoginUserResponse(
-                {
-                    "access_token": self.access_token,
-                    "refresh_token": self.refresh_token,
-                    "user_id": self.user_id,
-                }
-            )
-        except:
-            response = self.AuthAPI.login_with_email(email, password)
+        session = self.__session or aiohttp.ClientSession()
+        async with session.request(
+            method, url, proxy=self.__proxy_url, timeout=self.__timeout, **kwargs
+        ) as response:
+            await response.read()
 
-            if response.access_token is None:
-                raise ForbiddenError("Invalid email or password.")
+        if self.__session is None:
+            await session.close()
 
-            self.__cookie.set(
-                Cookie(
-                    {
-                        "authentication": {
-                            "access_token": response.access_token,
-                            "refresh_token": response.refresh_token,
-                        },
-                        "user": {
-                            "user_id": response.user_id,
-                            "email": email,
-                            "uuid": self.uuid,
-                        },
-                        "device": {"device_uuid": self.device_uuid},
-                    }
-                )
-            )
-            self.__cookie.save()
+        self.logger.debug(
+            "Received API response: [%s] %s\n\nHTTP Status: %s\n\nHeaders: %s\n\nResponse: %s\n",
+            method,
+            url,
+            response.status,
+            response.headers,
+            await response.text(),
+        )
 
-        self.logger.info(f"Successfully logged in as [{response.user_id}]")
-
-        # agree to the policy stuff
-        policy_response = self.MiscAPI.get_policy_agreements()
-
-        if not policy_response.latest_privacy_policy_agreed:
-            self.MiscAPI.accept_policy_agreement(type=PolicyType.privacy_policy)
-
-        if not policy_response.latest_terms_of_use_agreed:
-            self.MiscAPI.accept_policy_agreement(type=PolicyType.terms_of_use)
+        await raise_for_code(response)
+        await raise_for_status(response)
 
         return response
 
+    async def __make_request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        return_type: Optional[dict] = None,
+    ) -> Optional[dict | Model]:
+        """リクエストを行いモデルを生成する"""
+        response = await self.base_request(
+            method, url, params=params, json=json, headers=headers
+        )
+        response_json: Optional[dict] = await response.json(content_type=None)
+        return self.__construct_response(response_json, return_type)
 
-class Client(BaseClient):
-    """
+    async def __refresh_client_tokens(self) -> None:
+        """認証トークンのリフレッシュを行う"""
+        response = await self.auth.get_token(
+            grant_type="refresh_token", refresh_token=self.__state.refresh_token
+        )
+        self.__state.set_user(
+            LocalUser(
+                user_id=self.__state.user_id,
+                email=self.__state.email,
+                device_uuid=self.__state.device_uuid,
+                access_token=response.access_token,
+                refresh_token=response.refresh_token,
+            )
+        )
+        self.__state.update()
 
-    Yay!（イェイ）- API クライアント
+    async def __insert_delay(self) -> None:
+        """リクエスト間の時間が1秒未満のときに遅延を挿入する"""
+        if int(datetime.now().timestamp()) - self.__last_request_ts < 1:
+            await asyncio.sleep(random.uniform(self.__min_delay, self.__max_delay))
+        self.__last_request_ts = int(datetime.now().timestamp())
 
-    #### Useage
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[dict] = None,
+        json: Optional[dict] = None,
+        headers: Optional[dict] = None,
+        return_type: Optional[Model] = None,
+        jwt_required=False,
+    ) -> Optional[dict | Model]:
+        """リクエストに必要な処理を行う"""
+        if not url.startswith("https://"):
+            url = "https://" + url
 
-        >>> import yaylib
-        >>> api = yaylib.Client()
-        >>> api.login(email, password)
-        >>> api.create_post("Hello with yaylib!")
+        if not self.__header_manager.client_ip and "v2/users/timestamp" not in url:
+            metadata = await self.user.get_timestamp()
+            self.__header_manager.client_ip = metadata.ip_address
 
-    #### Parameters
+        backoff_duration = 0
+        headers = headers or {}
 
-        - intents: Intents - (optional)
-        - proxy_url: str - (optional)
-        - max_retries: int - (optional)
-        - backoff_factor: float - (optional)
-        - wait_on_ratelimit: bool - (optional)
-        - min_delay: float - (optional)
-        - max_delay: float - (optional)
-        - timeout: int - (optional)
-        - err_lang: str - (optional)
-        - base_path: str - (optional)
-        - save_cookie_file: bool - (optional)
-        - cookie_password: bool - (optional)
-        - cookie_filename: str - (optional)
-        - loglevel: int - (optional)
+        response = None
 
-    <https://github.com/ekkx/yaylib>
+        for i in range(max(1, self.__max_retries + 1)):
+            try:
+                await asyncio.sleep(backoff_duration)
+                while True:
+                    try:
+                        await self.__insert_delay()
+                        headers.update(self.__header_manager.generate(jwt_required))
+                        response = await self.__make_request(
+                            method,
+                            url,
+                            params=filter_dict(params),
+                            json=filter_dict(json),
+                            headers=headers,
+                            return_type=return_type,
+                        )
+                        break
+                    except (QuotaLimitExceededError, TooManyRequestsError) as err:
+                        self.logger.warning(
+                            "Rate limit exceeded. Waiting... (%s/%s)",
+                            self.__ratelimit.retries_performed,
+                            self.__ratelimit.max_retries,
+                        )
+                        await self.__ratelimit.wait(err)
+                self.__ratelimit.reset()
+                break
+            except (AccessTokenExpiredError, AccessTokenInvalidError) as err:
+                if self.user_id == 0:
+                    self.logger.error("Authentication required to perform the action.")
+                    raise err
+                await self.__refresh_client_tokens()
+            except UnauthorizedError as err:
+                if "/api/v1/oauth/token" in url:
+                    self.__state.destory(self.user_id)
+                    self.logger.error(
+                        "Failed to refresh credentials. Please try logging in again."
+                    )
+                    raise err
+            except HTTPInternalServerError as err:
+                self.logger.error(
+                    "Request failed with status %s! Retrying...", err.response.status
+                )
+                backoff_duration = self.__backoff_factor * (2**i)
 
-    ---
+        return response
 
-    ### Yay! (nanameue, Inc.) API Client
+    # ---------- call api ----------
 
-    Copyright (c) 2023 ekkx
+    def get_user_active_call(self, user_id: int) -> PostResponse:
+        """ユーザーが参加中の通話を取得する
 
-    """
+        Args:
+            user_id (int):
 
-    # -CALL
-
-    def get_user_active_call(self, user_id: int) -> Post:
+        Returns:
+            PostResponse:
         """
+        return asyncio.run(self.call.get_user_active_call(user_id))
 
-        ユーザーが参加中の通話を取得します
+    def get_bgms(self) -> BgmsResponse:
+        """通話のBGMを取得する
 
+        Returns:
+            BgmsResponse:
         """
-        return self.CallAPI.get_user_active_call(user_id).post
+        return asyncio.run(self.call.get_bgms())
 
-    def get_bgms(self) -> list[Bgm]:
+    def get_call(self, call_id: int) -> ConferenceCallResponse:
+        """通話を取得する
+
+        Args:
+            call_id (int):
+
+        Returns:
+            ConferenceCallResponse:
         """
+        return asyncio.run(self.call.get_call(call_id))
 
-        通話のBGMを取得します
+    def get_call_invitable_users(self, **params) -> UsersByTimestampResponse:
+        """通話に招待可能なユーザーを取得する
 
+        Args:
+            call_id (int):
+            from_timestamp (int, optional):
+
+        Returns:
+            UsersByTimestampResponse:
         """
-        return self.CallAPI.get_bgms().bgm
-
-    def get_call(self, call_id: int) -> ConferenceCall:
-        """
-
-        通話の詳細を取得します
-
-        """
-        return self.CallAPI.get_call(call_id).conference_call
-
-    def get_call_invitable_users(
-        self, call_id: int, from_timestamp: Optional[int] = None
-    ) -> UsersByTimestampResponse:
-        """
-
-        通話に招待可能なユーザーを取得します
-
-        """
-        return self.CallAPI.get_call_invitable_users(call_id, from_timestamp)
+        return asyncio.run(self.call.get_call_invitable_users(**params))
 
     def get_call_status(self, opponent_id: int) -> CallStatusResponse:
-        """
+        """通話の状態を取得します
 
-        通話の状態を取得します
+        Args:
+            opponent_id (int):
 
+        Returns:
+            CallStatusResponse:
         """
-        return self.CallAPI.get_call_status(opponent_id)
+        return asyncio.run(self.call.get_call_status(opponent_id))
 
     def get_games(self, **params) -> GamesResponse:
+        """通話に設定可能なゲームを取得する
+
+        Args:
+            number (int, optional):
+            ids (List[int], optional):
+            from_id (int, optional):
+
+        Returns:
+            GamesResponse:
         """
-
-        ゲームを取得します
-
-        Parameters
-        ----------
-            - number: int - (optional)
-            - ids: list[int] - (optional)
-            - from_id: int - (optional)
-
-        """
-        return self.CallAPI.get_games(**params)
+        return asyncio.run(self.call.get_games(**params))
 
     def get_genres(self, **params) -> GenresResponse:
+        """通話のジャンルを取得する
+
+        Args:
+            number (int, optional):
+            from (int, optional):
+
+        Returns:
+            GenresResponse:
         """
-
-        通話のジャンルを取得します
-
-        Parameters
-        ----------
-            - number: int - (optional)
-            - from: int - (optional)
-
-        """
-        return self.CallAPI.get_genres(**params)
+        return asyncio.run(self.call.get_genres(**params))
 
     def get_group_calls(self, **params) -> PostsResponse:
+        """サークル内の通話を取得する
+
+        Args:
+            number (int, optional):
+            group_category_id (int, optional):
+            from_timestamp (int, optional):
+            scope (str, optional):
+
+        Returns:
+            PostsResponse:
         """
+        return asyncio.run(self.call.get_group_calls(**params))
 
-        サークルの通話を取得します
+    def invite_online_followings_to_call(self, **params) -> Response:
+        """オンラインの友達をまとめて通話に招待します
 
-        Parameters
-        ----------
-            - number: int - (optional)
-            - group_category_id: int - (optional)
-            - from_timestamp: int - (optional)
-            - scope: str - (optional)
+        Args:
+            call_id (int, optional):
+            group_id (str, optional):
 
+        Returns:
+            Response:
         """
-        return self.CallAPI.get_group_calls(**params)
+        return asyncio.run(self.call.invite_online_followings_to_call(**params))
 
-    def invite_online_followings_to_call(
-        self,
-        call_id: int,
-        group_id: Optional[int] = None,
-    ) -> dict:
+    def invite_users_to_call(self, call_id: int, user_ids: List[int]) -> Response:
+        """通話に複数のユーザーを招待する
+
+        Args:
+            call_id (int):
+            user_ids (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.call.invite_users_to_call(call_id, user_ids))
 
-        オンラインの友達をまとめて通話に招待します
+    def invite_users_to_chat_call(self, **params) -> Response:
+        """ユーザーをチャット通話に招待する
 
-        Parameters
-        ----------
-            - call_id: int - (required)
-            - group_id: int - (optional)
+        Args:
+            chat_room_id (int):
+            room_id (int):
+            room_url (str):
 
+        Returns:
+            Response:
         """
-        return self.CallAPI.invite_to_call_bulk(call_id, group_id)
+        return asyncio.run(self.call.invite_users_to_chat_call(**params))
 
-    def invite_users_to_call(self, call_id: int, user_ids: list[int]) -> dict:
+    def kick_user_from_call(
+        self, call_id: int, **params
+    ) -> CallActionSignatureResponse:
+        """ユーザーを通話からキックする
+
+        Args:
+            call_id (int):
+            uuid (int):
+            ban (bool):
+
+        Returns:
+            Response:
         """
+        asyncio.run(self.call.kick_user_from_call(call_id, **params))
 
-        ユーザーを通話に招待します
+    def start_call(self, call_id: int, **params) -> Response:
+        """通話を開始する
 
-        Parameters
-        ----------
-            - call_id: int - (required)
-            - user_ids: list[int] - (required)
+        Args:
+            call_id (int):
+            joinable_by (str):
+            game_title (str, optional):
+            category_id (str, optional):
 
+        Returns:
+            Response:
         """
-        return self.CallAPI.invite_users_to_call(call_id, user_ids)
+        return asyncio.run(self.call.start_call(call_id, **params))
 
-    def invite_users_to_chat_call(
-        self,
-        chat_room_id: int,
-        room_id: int,
-        room_url: str,
-    ) -> dict:
+    def set_user_role(self, call_id: int, user_id: int, role: str) -> Response:
+        """通話の参加者に役職を付与する
+
+        Args:
+            call_id (int):
+            user_id (int):
+            role (str):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.call.set_user_role(call_id, user_id, role))
 
-        チャット通話にユーザーを招待します
+    def join_call(self, **params) -> ConferenceCallResponse:
+        """通話に参加する
 
-        Parameters
-        ----------
+        Args:
+            conference_id (int):
+            call_sid (str, optional):
 
-            - chat_room_id: int - (required)
-            - room_id: int - (required)
-            - room_url: int - (required)
-
+        Returns:
+            ConferenceCallResponse:
         """
-        return self.CallAPI.invite_users_to_chat_call(chat_room_id, room_id, room_url)
+        return asyncio.run(self.call.join_call(**params))
 
-    def kick_user_from_call(self, call_id: int, user_id: int) -> dict:
+    def leave_call(self, **params) -> Response:
+        """通話から退出する
+
+        Args:
+            conference_id (int):
+            call_sid (str, optional):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.call.leave_call(**params))
 
-        ユーザーを通話からキックします
+    def join_call_as_anonymous(self, **params) -> ConferenceCallResponse:
+        """匿名で通話に参加する
 
-        Parameters
-        ----------
+        Args:
+            conference_id (int):
+            agora_uid (str):
 
-            - call_id: int - (required)
-            - user_id: int - (required)
-
+        Returns:
+            ConferenceCallResponse:
         """
-        return self.CallAPI.kick_and_ban_from_call(call_id, user_id)
+        return asyncio.run(self.call.join_call_as_anonymous(**params))
 
-    def set_call(
-        self,
-        call_id: int,
-        joinable_by: str,
-        game_title: Optional[str] = None,
-        category_id: Optional[str] = None,
-    ) -> dict:
+    def leave_call_as_anonymous(self, **params) -> Response:
+        """匿名で参加した通話を退出する
+
+        Args:
+            conference_id (int):
+            agora_uid (str, optional):
+
+        Returns:
+            Response: _description_
         """
+        return asyncio.run(self.call.leave_call_as_anonymous(**params))
 
-        通話を開始します
-
-        """
-        return self.CallAPI.set_call(call_id, joinable_by, game_title, category_id)
-
-    def set_user_role(self, call_id: int, user_id: int, role: str) -> dict:
-        """
-
-        通話に参加中のユーザーに役職を与えます
-
-        """
-        return self.CallAPI.set_user_role(call_id, user_id, role)
-
-    def join_call(
-        self, conference_id: int, call_sid: Optional[str] = None
-    ) -> ConferenceCall:
-        """
-
-        通話に参加します
-
-        """
-        return self.CallAPI.start_call(conference_id, call_sid).conference_call
-
-    def join_call_as_anonymous(
-        self, conference_id: int, agora_uid: str
-    ) -> ConferenceCall:
-        """
-
-        無名くんとして通話に参加します
-
-        """
-        return self.CallAPI.start_anonymous_call(
-            conference_id, agora_uid
-        ).conference_call
-
-    def leave_call(
-        self,
-        conference_id: int,
-        call_sid: Optional[str] = None,
-    ) -> dict:
-        """
-
-        通話から退出します
-
-        """
-        return self.CallAPI.stop_call(conference_id, call_sid)
-
-    def leave_call_as_anonymous(
-        self, conference_id: int, agora_uid: Optional[str] = None
-    ):
-        """
-
-        通話から退出します
-
-        """
-        return self.CallAPI.stop_anonymous_call(conference_id, agora_uid)
-
-    # -CASSANDRA
+    # ---------- notification api ----------
 
     def get_activities(self, **params) -> ActivitiesResponse:
+        """通知を取得する
+
+        Args:
+            important (bool):
+            from_timestamp (int, optional):
+            number (int, optional):
+
+        Returns:
+            ActivitiesResponse:
         """
-
-        通知を取得します
-
-        Parameters
-        ----------
-            - important: bool - (required)
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.NotificationAPI.get_user_activities(**params)
+        return asyncio.run(self.notification.get_activities(**params))
 
     def get_merged_activities(self, **params) -> ActivitiesResponse:
+        """全種類の通知を取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional):
+
+        Returns:
+            ActivitiesResponse:
         """
+        return asyncio.run(self.notification.get_merged_activities(**params))
 
-        全種類の通知を取得します
+    # ---------- chat api ----------
 
-        Parameters
-        ----------
+    def accept_chat_requests(self, **params) -> Response:
+        """チャットリクエストを承認する
 
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
+        Args:
+            chat_room_ids (List[int]):
 
+        Returns:
+            Response:
         """
-        return self.NotificationAPI.get_user_merged_activities(**params)
+        return asyncio.run(self.chat.accept_chat_requests(**params))
 
-    def received_notification(
-        self,
-        pid: str,
-        type: str,
-        opened_at: Optional[int] = None,
-    ) -> dict:
-        return self.NotificationAPI.received_notification(pid, type, opened_at)
+    def check_unread_status(self, **params) -> UnreadStatusResponse:
+        """チャットの未読ステータスを確認する
 
-    # -CHAT
+        Args:
+            from_time (int):
 
-    def accept_chat_requests(self, chat_room_ids: list[int]) -> dict:
+        Returns:
+            UnreadStatusResponse:
         """
+        return asyncio.run(self.chat.check_unread_status(**params))
 
-        チャットリクエストを承認します
+    def create_group_chat(self, **params) -> CreateChatRoomResponse:
+        """グループチャットを作成する
 
-        Parameters
-        ----------
+        Args:
+            name (str):
+            with_user_ids (List[int]):
+            icon_filename (str, optional):
+            background_filename (str, optional):
 
-            - chat_room_ids: list[int] - (required)
-
+        Returns:
+            CreateChatRoomResponse:
         """
-        return self.ChatAPI.accept_chat_requests(chat_room_ids)
+        return asyncio.run(self.chat.create_group_chat(**params))
 
-    def check_unread_status(self, from_time: int) -> UnreadStatusResponse:
+    def create_private_chat(self, **params) -> CreateChatRoomResponse:
+        """個人チャットを作成する
+
+        Args:
+            with_user_id (int):
+            matching_id (int, optional):
+            hima_chat (bool, optional):
+
+        Returns:
+            CreateChatRoomResponse:
         """
+        return asyncio.run(self.chat.create_private_chat(**params))
 
-        チャットの未読ステータスを確認します
+    def delete_chat_background(self, room_id: int) -> Response:
+        """チャットの背景を削除する
 
+        Args:
+            room_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ChatAPI.check_unread_status(from_time)
+        return asyncio.run(self.chat.delete_chat_background(room_id))
 
-    def create_group_chat(
-        self,
-        name: str,
-        with_user_ids: list[int],
-        icon_filename: Optional[str] = None,
-        background_filename: Optional[str] = None,
-    ) -> CreateChatRoomResponse:
+    def delete_message(self, room_id: int, message_id: int) -> Response:
+        """チャットメッセージを削除する
+
+        Args:
+            room_id (int):
+            message_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.chat.delete_message(room_id, message_id))
 
-        グループチャットを作成します
+    def edit_chat_room(self, **params) -> Response:
+        """チャットルームを編集する
 
-        Parameters
-        ----------
+        Args:
+            chat_room_id (int):
+            name (str):
+            icon_filename (str, optional):
+            background_filename (str, optional):
 
-            - name: str - (required)
-            - with_user_ids: list[int] - (required)
-            - icon_filename: str - (optional)
-            - background_filename: str - (optional)
-
+        Returns:
+            Response:
         """
-        return self.ChatAPI.create_group_chat(
-            name, with_user_ids, icon_filename, background_filename
-        )
+        return asyncio.run(self.chat.edit_chat_room(**params))
 
-    def create_private_chat(
-        self,
-        with_user_id: int,
-        matching_id: Optional[int] = None,
-        hima_chat: Optional[bool] = False,
-    ) -> CreateChatRoomResponse:
+    def get_chatable_users(self, **params) -> FollowUsersResponse:
+        """チャット可能なユーザーを取得する
+
+        Args:
+            from_follow_id (int, optional):
+            from_timestamp (int, optional):
+            order_by (str, optional):
+
+        Returns:
+            FollowUsersResponse:
         """
+        return asyncio.run(self.chat.get_chatable_users(**params))
 
-        個人チャットを作成します
+    def get_gifs_data(self) -> GifsDataResponse:
+        """チャット用 GIF データを取得する
 
-        Parameters
-        ----------
-
-            - with_user_id: int - (required)
-            - matching_id: str - (optional)
-            - hima_chat: bool - (optional)
-
+        Returns:
+            GifsDataResponse:
         """
-        return self.ChatAPI.create_private_chat(with_user_id, matching_id, hima_chat)
-
-    def delete_background(self, room_id: int) -> dict:
-        """
-
-        チャットの背景画像を削除します
-
-        Parameters
-        ----------
-
-            - room_id: int - (required)
-
-        """
-        return self.ChatAPI.delete_background(room_id)
-
-    def delete_message(self, room_id: int, message_id: int) -> dict:
-        """
-
-        メッセージを削除します
-
-        Parameters
-        ----------
-
-            - room_id: int - (required)
-            - message_id: int - (required)
-
-        """
-        return self.ChatAPI.delete_message(room_id, message_id)
-
-    def edit_chat_room(
-        self,
-        chat_room_id: int,
-        name: str,
-        icon_filename: Optional[str] = None,
-        background_filename: Optional[str] = None,
-    ) -> dict:
-        """
-
-        チャットルームを編集します
-
-        """
-        return self.ChatAPI.edit_chat_room(
-            chat_room_id, name, icon_filename, background_filename
-        )
-
-    def get_chatable_users(
-        self,
-        from_follow_id: Optional[int] = None,
-        from_timestamp: Optional[int] = None,
-        order_by: Optional[str] = None,
-    ) -> FollowUsersResponse:
-        """
-
-        チャット可能なユーザーを取得します
-
-        """
-        return self.ChatAPI.get_chatable_users(
-            from_follow_id,
-            from_timestamp,
-            order_by,
-        )
-
-    def get_gifs_data(self) -> list[GifImageCategory]:
-        """
-
-        チャットルームのGIFデータを取得します
-
-        """
-        return self.ChatAPI.get_gifs_data().gif_categories
+        return asyncio.run(self.chat.get_gifs_data())
 
     def get_hidden_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """非表示に設定したチャットルームを取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional)
+
+        Returns:
+            ChatRoomsResponse:
         """
+        return asyncio.run(self.chat.get_hidden_chat_rooms(**params))
 
-        非表示のチャットルームを取得します
+    def get_main_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """メインのチャットルームを取得する
 
-        Parameters
-        ----------
+        Args:
+            from_timestamp (int, optional):
 
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
-
+        Returns:
+            ChatRoomsResponse:
         """
-        return self.ChatAPI.get_hidden_chat_rooms(**params)
+        return asyncio.run(self.chat.get_main_chat_rooms(**params))
 
-    def get_main_chat_rooms(
-        self, from_timestamp: Optional[int] = None
-    ) -> ChatRoomsResponse:
+    def get_messages(self, chat_room_id: int, **params) -> MessagesResponse:
+        """メッセージを取得する
+
+        Args:
+            from_message_id (int, optional):
+            to_message_id (int, optional):
+
+        Returns:
+            MessagesResponse:
         """
-
-        メインのチャットルームを取得します
-
-        """
-        return self.ChatAPI.get_main_chat_rooms(from_timestamp)
-
-    def get_messages(self, chat_room_id: int, **params) -> list[Message]:
-        """
-
-        メッセージを取得します
-
-        Parameters
-        ---------------
-            - from_message_id: int - (optional)
-            - to_message_id: int - (optional)
-
-        """
-        return self.ChatAPI.get_messages(chat_room_id, **params).messages
+        return asyncio.run(self.chat.get_messages(chat_room_id, **params))
 
     def get_chat_requests(self, **params) -> ChatRoomsResponse:
+        """チャットリクエストを取得する
+
+        Args:
+            number (int, optional):
+            from_timestamp (int, optional):
+
+        Returns:
+            ChatRoomsResponse:
         """
+        return asyncio.run(self.chat.get_chat_requests(**params))
 
-        チャットリクエストを取得します
+    def get_chat_room(self, chat_room_id: int) -> ChatRoomResponse:
+        """チャットルームを取得する
 
-        Parameters:
-        -----------
+        Args:
+            chat_room_id (int):
 
-            - number: int (optional)
-            - from_timestamp: int (optional)
-            - : str (optional)
-
+        Returns:
+            ChatRoomResponse:
         """
-        return self.ChatAPI.get_request_chat_rooms(**params)
+        return asyncio.run(self.chat.get_chat_room(chat_room_id))
 
-    def get_chat_room(self, chat_room_id: int) -> ChatRoom:
+    def get_sticker_packs(self) -> StickerPacksResponse:
+        """チャット用のスタンプを取得する
+
+        Returns:
+            StickerPacksResponse:
         """
+        return asyncio.run(self.chat.get_sticker_packs())
 
-        チャットルームの詳細を取得します
+    def get_total_chat_requests(self) -> TotalChatRequestResponse:
+        """チャットリクエストの総数を取得する
 
+        Returns:
+            TotalChatRequestResponse:
         """
-        return self.ChatAPI.get_chat_room(chat_room_id).chat
+        return asyncio.run(self.chat.get_total_chat_requests())
 
-    def get_sticker_packs(self) -> list[StickerPack]:
+    def hide_chat(self, chat_room_id: int) -> Response:
+        """チャットルームを非表示にする
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.chat.hide_chat(chat_room_id))
 
-        スタンプを取得します
+    def invite_to_chat(self, **params) -> Response:
+        """チャットルームにユーザーを招待する
 
+        Args:
+            chat_room_id (int):
+            with_user_ids (List[int]):
+
+        Returns:
+            Response:
         """
-        return self.ChatAPI.get_sticker_packs().sticker_packs
+        return asyncio.run(self.chat.invite_to_chat(**params))
 
-    def get_chat_requests_count(self) -> int:
+    def kick_users_from_chat(self, **params) -> Response:
+        """チャットルームからユーザーを追放する
+
+        Args:
+            chat_room_id (int):
+            with_user_ids (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.chat.kick_users_from_chat(**params))
 
-        チャットリクエストの数を取得します
+    def pin_chat(self, room_id: int) -> Response:
+        """チャットルームをピン留めする
 
+        Args:
+            room_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ChatAPI.get_total_chat_requests().total
+        return asyncio.run(self.chat.pin_chat(room_id))
 
-    def hide_chat(self, chat_room_id: int) -> dict:
+    def read_message(self, chat_room_id: int, message_id: int) -> Response:
+        """メッセージを既読にする
+
+        Args:
+            chat_room_id (int):
+            message_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.chat.read_message(chat_room_id, message_id))
 
-        チャットルームを非表示にします
+    def refresh_chat_rooms(self, **params) -> ChatRoomsResponse:
+        """チャットルームを更新する
 
+        Args:
+            from_time (int, optional):
+
+        Returns:
+            ChatRoomsResponse:
         """
-        return self.ChatAPI.hide_chat(chat_room_id)
+        return asyncio.run(self.chat.refresh_chat_rooms(**params))
 
-    def invite_to_chat(self, chat_room_id: int, user_ids: list[int]) -> dict:
+    def delete_chat_rooms(self, **params) -> Response:
+        """チャットルームを削除する
+
+        Args:
+            chat_room_ids (List[int]):
+
+        Returns:
+            Response:
         """
-
-        チャットルームにユーザーを招待します
-
-        """
-        return self.ChatAPI.invite_to_chat(chat_room_id, user_ids)
-
-    def kick_users_from_chat(self, chat_room_id: int, user_ids: list[int]) -> dict:
-        """
-
-        チャットルームからユーザーを追放します
-
-        """
-        return self.ChatAPI.kick_users_from_chat(chat_room_id, user_ids)
-
-    def pin_chat(self, room_id: int) -> dict:
-        """
-
-        チャットルームをピン止めします
-
-        """
-        return self.ChatAPI.pin_chat(room_id)
-
-    def read_message(self, chat_room_id: int, message_id: int) -> dict:
-        """
-
-        メッセージを既読にします
-
-        """
-        return self.ChatAPI.read_message(chat_room_id, message_id)
-
-    def refresh_chat_rooms(self, from_time: Optional[int] = None) -> ChatRoomsResponse:
-        """
-
-        チャットルームを更新します
-
-        """
-        return self.ChatAPI.refresh_chat_rooms(from_time)
-
-    def remove_chat_rooms(self, chat_room_ids: list[int]) -> dict:
-        """
-
-        チャットルームを削除します
-
-        """
-        return self.ChatAPI.remove_chat_rooms(chat_room_ids)
-
-    def report_chat_room(
-        self,
-        chat_room_id: int,
-        opponent_id: int,
-        category_id: int,
-        reason: Optional[str] = None,
-        screenshot_filename: Optional[str] = None,
-        screenshot_2_filename: Optional[str] = None,
-        screenshot_3_filename: Optional[str] = None,
-        screenshot_4_filename: Optional[str] = None,
-    ) -> dict:
-        """
-
-        チャットルームを通報します
-
-        """
-        return self.ChatAPI.report_chat_room(
-            chat_room_id,
-            opponent_id,
-            category_id,
-            reason,
-            screenshot_filename,
-            screenshot_2_filename,
-            screenshot_3_filename,
-            screenshot_4_filename,
-        )
+        return asyncio.run(self.chat.delete_chat_rooms(**params))
 
     def send_message(
         self,
         chat_room_id: int,
         **params,
     ) -> MessageResponse:
+        """チャットを送信する
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            MessageResponse:
         """
+        return asyncio.run(self.chat.send_message(chat_room_id, **params))
 
-        チャットルームにメッセージを送信します
+    def unhide_chat(self, **params) -> Response:
+        """非表示に設定したチャットルームを表示する
 
-        Parameters:
-        -----------
+        Args:
+            chat_room_ids (int):
 
-            - chat_room_id: int (required)
-            - message_type: str (required)
-            - call_type: str = (optional)
-            - text: str = (optional)
-            - font_size: int = (optional)
-            - gif_image_id: int = (optional)
-            - attachment_file_name: str = (optional)
-            - sticker_pack_id: int = (optional)
-            - sticker_id: int = (optional)
-            - video_file_name: str = (optional)
-            - parent_id: int = (optional)
-            - : str = (optional)
-
+        Returns:
+            Response:
         """
-        return self.ChatAPI.send_message(chat_room_id, **params)
+        return asyncio.run(self.chat.unhide_chat(**params))
 
-    def unhide_chat(self, chat_room_ids: int) -> dict:
+    def unpin_chat(self, chat_room_id: int) -> Response:
+        """チャットのピン留めを解除する
+
+        Args:
+            chat_room_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.chat.unpin_chat(chat_room_id))
 
-        チャットの非表示を解除します
+    # ---------- group api ----------
 
+    def accept_moderator_offer(self, group_id: int) -> Response:
+        """サークル副管理人の権限オファーを引き受ける
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ChatAPI.unhide_chat(chat_room_ids)
+        return asyncio.run(self.group.accept_moderator_offer(group_id))
 
-    def unpin_chat(self, chat_room_id: int) -> dict:
+    def accept_ownership_offer(self, group_id: int) -> Response:
+        """サークル管理人の権限オファーを引き受けます
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.accept_ownership_offer(group_id))
 
-        チャットルームのピン止めを解除します
+    def accept_group_join_request(self, group_id: int, user_id: int) -> Response:
+        """サークル参加リクエストを承認します
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ChatAPI.unpin_chat(chat_room_id)
+        return asyncio.run(self.group.accept_group_join_request(group_id, user_id))
 
-    # -GROUP
+    def add_related_groups(
+        self, group_id: int, related_group_id: List[int]
+    ) -> Response:
+        """関連サークルを追加する
 
-    def accept_moderator_offer(self, group_id: int) -> dict:
+        Args:
+            group_id (int):
+            related_group_id (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.add_related_groups(group_id, related_group_id))
 
-        サークル副管理人の権限オファーを引き受けます
+    def ban_group_user(self, group_id: int, user_id: int) -> Response:
+        """サークルからユーザーを追放する
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.accept_moderator_offer(group_id)
+        return asyncio.run(self.group.ban_group_user(group_id, user_id))
 
-    def accept_ownership_offer(self, group_id: int) -> dict:
+    def check_group_unread_status(self, **params) -> UnreadStatusResponse:
+        """サークルの未読ステータスを取得する
+
+        Args:
+            from_time (int, optional):
+
+        Returns:
+            UnreadStatusResponse:
         """
+        return asyncio.run(self.group.check_group_unread_status(**params))
 
-        サークル管理人の権限オファーを引き受けます
+    def create_group(self, **params) -> CreateGroupResponse:
+        """サークルを作成する
 
+        Args:
+            topic (str):
+            description (str, optional):
+            secret (bool, optional):
+            hide_reported_posts (bool, optional):
+            hide_conference_call (bool, optional):
+            is_private (bool, optional):
+            only_verified_age (bool, optional):
+            only_mobile_verified (bool, optional):
+            call_timeline_display (bool, optional):
+            allow_ownership_transfer (bool, optional):
+            allow_thread_creation_by (str, optional):
+            gender (int, optional):
+            generation_groups_limit (int, optional):
+            group_category_id (int, optional):
+            cover_image_filename (str, optional):
+            sub_category_id (str, optional):
+            hide_from_game_eight (bool, optional):
+            allow_members_to_post_media (bool, optional):
+            allow_members_to_post_url (bool, optional):
+            guidelines (str, optional):
+
+        Returns:
+            CreateGroupResponse:
         """
-        return self.GroupAPI.accept_ownership_offer(group_id)
+        return asyncio.run(self.group.create_group(**params))
 
-    def accept_group_join_request(self, group_id: int, user_id: int) -> dict:
+    def pin_group(self, group_id: int) -> Response:
+        """サークルをピン留めする
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.pin_group(group_id))
 
-        サークル参加リクエストを承認します
+    def decline_moderator_offer(self, group_id: int) -> Response:
+        """サークル副管理人の権限オファーを断る
 
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.accept_group_join_request(group_id, user_id)
+        return asyncio.run(self.group.decline_moderator_offer(group_id))
 
-    def add_related_groups(self, group_id: int, related_group_id: list[int]) -> dict:
+    def decline_ownership_offer(self, group_id: int) -> Response:
+        """サークル管理人の権限オファーを断る
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.decline_ownership_offer(group_id))
 
-        関連サークルを追加します
+    def decline_group_join_request(self, group_id: int, user_id: int) -> Response:
+        """サークル参加リクエストを断る
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.add_related_groups(group_id, related_group_id)
+        return asyncio.run(self.group.decline_group_join_request(group_id, user_id))
 
-    def ban_group_user(self, group_id: int, user_id: int) -> dict:
+    def unpin_group(self, group_id: int) -> Response:
+        """サークルのピン留めを解除する
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.unpin_group(group_id))
 
-        サークルからユーザーを追放します
+    def get_banned_group_members(self, **params) -> UsersResponse:
+        """追放されたサークルメンバーを取得する
 
+        Args:
+            group_id (int):
+            page (int, optional):
+
+        Returns:
+            UsersResponse:
         """
-        return self.GroupAPI.ban_group_user(group_id, user_id)
-
-    def check_unread_status(
-        self, from_time: Optional[int] = None
-    ) -> UnreadStatusResponse:
-        """
-
-        サークルの未読ステータスを取得します
-
-        """
-        return self.GroupAPI.check_unread_status(from_time)
-
-    def create_group(
-        self,
-        topic: str,
-        description: Optional[str] = None,
-        secret: Optional[bool] = None,
-        hide_reported_posts: Optional[bool] = None,
-        hide_conference_call: Optional[bool] = None,
-        is_private: Optional[bool] = None,
-        only_verified_age: Optional[bool] = None,
-        only_mobile_verified: Optional[bool] = None,
-        call_timeline_display: Optional[bool] = None,
-        allow_ownership_transfer: Optional[bool] = None,
-        allow_thread_creation_by: Optional[bool] = None,
-        gender: Optional[int] = None,
-        generation_groups_limit: Optional[int] = None,
-        group_category_id: Optional[int] = None,
-        cover_image_filename: Optional[str] = None,
-        sub_category_id: Optional[str] = None,
-        hide_from_game_eight: Optional[bool] = None,
-        allow_members_to_post_media: Optional[bool] = None,
-        allow_members_to_post_url: Optional[bool] = None,
-        guidelines: Optional[str] = None,
-    ) -> CreateGroupResponse:
-        """
-
-        サークルを作成します
-
-        """
-        return self.GroupAPI.create_group(
-            topic,
-            description,
-            secret,
-            hide_reported_posts,
-            hide_conference_call,
-            is_private,
-            only_verified_age,
-            only_mobile_verified,
-            call_timeline_display,
-            allow_ownership_transfer,
-            allow_thread_creation_by,
-            gender,
-            generation_groups_limit,
-            group_category_id,
-            cover_image_filename,
-            sub_category_id,
-            hide_from_game_eight,
-            allow_members_to_post_media,
-            allow_members_to_post_url,
-            guidelines,
-        )
-
-    def pin_group(self, group_id: int) -> dict:
-        """
-
-        サークルをピンします
-
-        """
-        return self.GroupAPI.create_pin_group(group_id)
-
-    def decline_moderator_offer(self, group_id: int) -> dict:
-        """
-
-        サークル副管理人の権限オファーを断ります
-
-        """
-        return self.GroupAPI.decline_moderator_offer(group_id)
-
-    def decline_ownership_offer(self, group_id: int) -> dict:
-        """
-
-        サークル管理人の権限オファーを断ります
-
-        """
-        return self.GroupAPI.decline_ownership_offer(group_id)
-
-    def decline_group_join_request(self, group_id: int, user_id: int) -> dict:
-        """
-
-        サークル参加リクエストを断ります
-
-        """
-        return self.GroupAPI.decline_group_join_request(group_id, user_id)
-
-    def unpin_group(self, group_id: int) -> dict:
-        """
-
-        サークルのピン止めを解除します
-
-        """
-        return self.GroupAPI.delete_pin_group(group_id)
-
-    def get_banned_group_members(
-        self,
-        group_id: int,
-        page: Optional[int] = None,
-    ) -> UsersResponse:
-        """
-
-        追放されたサークルメンバーを取得します
-
-        """
-        return self.GroupAPI.get_banned_group_members(group_id, page)
+        return asyncio.run(self.group.get_banned_group_members(**params))
 
     def get_group_categories(self, **params) -> GroupCategoriesResponse:
+        """サークルのカテゴリーを取得する
+
+        Args:
+            page (int, optional):
+            number (int, optional):
+
+        Returns:
+            GroupCategoriesResponse:
         """
-
-        サークルのカテゴリーを取得します
-
-        Parameters
-        ----------
-
-            - page: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.GroupAPI.get_group_categories(**params)
+        return asyncio.run(self.group.get_group_categories(**params))
 
     def get_create_group_quota(self) -> CreateGroupQuota:
+        """残りのサークル作成可能回数を取得する
+
+        Returns:
+            CreateGroupQuota:
         """
+        return asyncio.run(self.group.get_create_group_quota())
 
-        サークル作成可能な割当量を取得します
+    def get_group(self, group_id: int) -> GroupResponse:
+        """サークルの詳細を取得する
 
+        Args:
+            group_id (int):
+
+        Returns:
+            GroupResponse:
         """
-        return self.GroupAPI.get_create_group_quota()
-
-    def get_group(self, group_id: int) -> Group:
-        """
-
-        サークルの詳細を取得します
-
-        """
-        return self.GroupAPI.get_group(group_id).group
+        return asyncio.run(self.group.get_group(group_id))
 
     def get_groups(self, **params) -> GroupsResponse:
+        """複数のサークル情報を取得する
+
+        Args:
+            group_category_id (int, optional):
+            keyword (str, optional):
+            from_timestamp (int, optional):
+            sub_category_id (int, optional):
+
+        Returns:
+            GroupsResponse:
         """
-
-        複数のサークルの詳細を取得します
-
-        Parameters
-        ----------
-
-            - group_category_id: int = None
-            - keyword: str = None
-            - from_timestamp: int = None
-            - sub_category_id: int = None
-
-        """
-        return self.GroupAPI.get_groups(**params)
+        return asyncio.run(self.group.get_groups(**params))
 
     def get_invitable_users(self, group_id: int, **params) -> UsersByTimestampResponse:
+        """サークルに招待可能なユーザーを取得する
+
+        Args:
+            group_id (int):
+            from_timestamp (int, optional):
+            user[nickname] (str, optional):
+
+        Returns:
+            UsersByTimestampResponse:
         """
+        return asyncio.run(self.group.get_invitable_users(group_id, **params))
 
-        サークルに招待可能なユーザーを取得します
+    def get_joined_statuses(self, ids: List[int]) -> Response:
+        """サークルの参加ステータスを取得する
 
-        Parameters
-        ----------
+        Args:
+            ids (List[int]):
 
-            - from_timestamp: int - (optional)
-            - user[nickname]: str - (optional)
-
+        Returns:
+            Response:
         """
-        return self.GroupAPI.get_invitable_users(group_id, **params)
-
-    def get_joined_statuses(self, ids: list[int]) -> dict:
-        """
-
-        サークルの参加ステータスを取得します
-
-        """
-        return self.GroupAPI.get_joined_statuses(ids)
+        return asyncio.run(self.group.get_joined_statuses(ids))
 
     def get_group_member(self, group_id: int, user_id: int) -> GroupUserResponse:
-        """
+        """特定のサークルメンバーの情報を取得する
 
-        特定のサークルメンバーの情報を取得します
+        Args:
+            group_id (int):
+            user_id (int):
 
+        Returns:
+            GroupUserResponse:
         """
-        return self.GroupAPI.get_group_member(group_id, user_id)
+        return asyncio.run(self.group.get_group_member(group_id, user_id))
 
     def get_group_members(self, group_id: int, **params) -> GroupUsersResponse:
+        """サークルメンバーを取得する
+
+        Args:
+            group_id (int):
+            id (int):
+            mode (str, optional):
+            keyword (str, optional):
+            from_id (int, optional):
+            from_timestamp (int, optional):
+            order_by (str, optional):
+            followed_by_me: (bool, optional)
+
+        Returns:
+            GroupUsersResponse:
         """
+        return asyncio.run(self.group.get_group_members(group_id, **params))
 
-        サークルメンバーを取得します
+    def get_my_groups(self, **params) -> GroupsResponse:
+        """自分のサークルを取得する
 
-        Parameters
-        ----------
+        Args:
+            from_timestamp (_type_, optional):
 
-            - id: int - (required)
-            - mode: str - (optional)
-            - keyword: str - (optional)
-            - from_id: int - (optional)
-            - from_timestamp: int - (optional)
-            - order_by: str - (optional)
-            - followed_by_me: bool - (optional)
-
+        Returns:
+            GroupsResponse:
         """
-        return self.GroupAPI.get_group_members(group_id, **params)
-
-    def get_my_groups(self, from_timestamp: Optional[int] = None) -> GroupsResponse:
-        """
-
-        自分のサークルを取得します
-
-        """
-        return self.GroupAPI.get_my_groups(from_timestamp)
+        return asyncio.run(self.group.get_my_groups(**params))
 
     def get_relatable_groups(self, group_id: int, **params) -> GroupsRelatedResponse:
+        """関連がある可能性があるサークルを取得する
+
+        Args:
+            group_id (int):
+            keyword (str, optional):
+            from (str, optional):
+
+        Returns:
+            GroupsRelatedResponse:
         """
-
-        関連がある可能性があるサークルを取得します
-
-        Parameters
-        ----------
-
-            - group_id: int - (required)
-            - keyword: str - (optional)
-            - from: str - (optional)
-
-        """
-        return self.GroupAPI.get_relatable_groups(group_id, **params)
+        return asyncio.run(self.group.get_relatable_groups(group_id, **params))
 
     def get_related_groups(self, group_id: int, **params) -> GroupsRelatedResponse:
+        """関連があるサークルを取得する
+
+        Args:
+            group_id (int):
+            keyword (str, optional):
+            from (str, optional):
+
+        Returns:
+            GroupsRelatedResponse:
         """
-
-        関連があるサークルを取得します
-
-        Parameters
-        ----------
-
-            - group_id: int - (required)
-            - keyword: str - (optional)
-            - from: str - (optional)
-
-        """
-        return self.GroupAPI.get_related_groups(group_id, **params)
+        return asyncio.run(self.group.get_related_groups(group_id, **params))
 
     def get_user_groups(self, **params) -> GroupsResponse:
+        """特定のユーザーが参加しているサークルを取得する
+
+        Args:
+            user_id (int):
+            page (int, optional):
+
+        Returns:
+            GroupsResponse:
         """
+        return asyncio.run(self.group.get_user_groups(**params))
 
-        特定のユーザーが参加しているサークルを取得します
+    def invite_users_to_group(self, group_id: int, user_ids: List[int]) -> Response:
+        """サークルにユーザーを招待する
 
-        Parameters
-        ----------
+        Args:
+            group_id (int):
+            user_ids (List[int]):
 
-            - user_id: int - (required)
-            - page: int - (optional)
-
+        Returns:
+            Response:
         """
-        return self.GroupAPI.get_user_groups(**params)
+        return asyncio.run(self.group.invite_users_to_group(group_id, user_ids))
 
-    def invite_users_to_group(self, group_id: int, user_ids: list[int]) -> dict:
+    def join_group(self, group_id: int) -> Response:
+        """サークルに参加する
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.join_group(group_id))
 
-        サークルにユーザーを招待します
+    def leave_group(self, group_id: int) -> Response:
+        """サークルから脱退する
 
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.invite_users_to_group(group_id, user_ids)
+        return asyncio.run(self.group.leave_group(group_id))
 
-    def join_group(self, group_id: int) -> dict:
+    def delete_group_cover(self, group_id: int) -> Response:
+        """サークルのカバー画像を削除する
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.delete_group_cover(group_id))
 
-        サークルに参加します
+    def delete_moderator(self, group_id: int, user_id: int) -> Response:
+        """サークルの副管理人を削除する
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.join_group(group_id)
+        return asyncio.run(self.group.delete_moderator(group_id, user_id))
 
-    def leave_group(self, group_id: int) -> dict:
+    def delete_related_groups(
+        self, group_id: int, related_group_ids: List[int]
+    ) -> Response:
+        """関連のあるサークルを削除する
+
+        Args:
+            group_id (int):
+            related_group_ids (List[int]):
+
+        Returns:
+            Response:
         """
-
-        サークルから脱退します
-
-        """
-        return self.GroupAPI.leave_group(group_id)
-
-    def post_gruop_social_shared(self, group_id: int, sns_name: str) -> dict:
-        """
-
-        サークルのソーシャルシェアを投稿します
-
-        """
-        return self.GroupAPI.post_gruop_social_shared(group_id, sns_name)
-
-    def remove_group_cover(self, group_id: int) -> dict:
-        """
-
-        サークルのカバー画像を削除します
-
-        """
-        return self.GroupAPI.remove_group_cover(group_id)
-
-    def remove_moderator(self, group_id: int, user_id: int) -> dict:
-        """
-
-        サークルの副管理人を削除します
-
-        """
-        return self.GroupAPI.remove_moderator(group_id, user_id)
-
-    def remove_related_groups(
-        self, group_id: int, related_group_ids: list[int]
-    ) -> dict:
-        """
-
-        関連のあるサークルを削除します
-
-        """
-        return self.GroupAPI.remove_related_groups(group_id, related_group_ids)
-
-    def report_group(
-        self,
-        group_id: int,
-        category_id: int,
-        reason: Optional[str] = None,
-        opponent_id: Optional[int] = None,
-        screenshot_filename: Optional[str] = None,
-        screenshot_2_filename: Optional[str] = None,
-        screenshot_3_filename: Optional[str] = None,
-        screenshot_4_filename: Optional[str] = None,
-    ) -> dict:
-        """
-
-        サークルを通報します
-
-        """
-        return self.GroupAPI.report_group(
-            group_id,
-            category_id,
-            reason,
-            opponent_id,
-            screenshot_filename,
-            screenshot_2_filename,
-            screenshot_3_filename,
-            screenshot_4_filename,
+        return asyncio.run(
+            self.group.delete_related_groups(group_id, related_group_ids)
         )
 
-    def send_moderator_offers(self, group_id: int, user_ids: list[int]) -> dict:
+    def send_moderator_offers(self, group_id: int, user_ids: List[int]) -> Response:
+        """複数人にサークル副管理人のオファーを送信する
+
+        Args:
+            group_id (int):
+            user_ids (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.send_moderator_offers(group_id, user_ids))
 
-        複数人にサークル副管理人のオファーを送信します
+    def send_ownership_offer(self, group_id: int, user_id: int) -> Response:
+        """サークル管理人権限のオファーを送信する
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.send_moderator_offers(group_id, user_ids)
+        return asyncio.run(self.group.send_ownership_offer(group_id, user_id))
 
-    def send_ownership_offer(self, group_id: int, user_id: int) -> dict:
+    def set_group_title(self, group_id: int, title: str) -> Response:
+        """サークルのタイトルを設定する
+
+        Args:
+            group_id (int):
+            title (str):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.set_group_title(group_id, title))
 
-        サークル管理人権限のオファーを送信します
+    def take_over_group_ownership(self, group_id: int) -> Response:
+        """サークル管理人の権限を引き継ぐ
 
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.send_ownership_offer(group_id, user_id)
+        return asyncio.run(self.group.take_over_group_ownership(group_id))
 
-    def set_group_title(self, group_id: int, title: str) -> dict:
+    def unban_group_member(self, group_id: int, user_id: int) -> Response:
+        """特定のサークルメンバーの追放を解除する
+
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.unban_group_member(group_id, user_id))
 
-        サークルのタイトルを設定します
+    def update_group(self, group_id: int, **params) -> GroupResponse:
+        """サークルを編集する
 
+        Args:
+            group_id (int):
+            topic (str):
+            description (str, optional):
+            secret (bool, optional):
+            hide_reported_posts (bool, optional):
+            hide_conference_call (bool, optional):
+            is_private (bool, optional):
+            only_verified_age (bool, optional):
+            only_mobile_verified (bool, optional):
+            call_timeline_display (bool, optional):
+            allow_ownership_transfer (bool, optional):
+            allow_thread_creation_by (str, optional):
+            gender (int, optional):
+            generation_groups_limit (int, optional):
+            group_category_id (int, optional):
+            cover_image_filename (str, optional):
+            sub_category_id (str, optional):
+            hide_from_game_eight (bool, optional):
+            allow_members_to_post_media (bool, optional):
+            allow_members_to_post_url (bool, optional):
+            guidelines (str, optional):
+
+        Returns:
+            GroupResponse:
         """
-        return self.GroupAPI.set_group_title(group_id, title)
+        return asyncio.run(self.group.update_group(group_id, **params))
 
-    def take_over_group_ownership(self, group_id: int) -> dict:
+    def withdraw_moderator_offer(self, group_id: int, user_id: int) -> Response:
+        """サークル副管理人のオファーを取り消す
+
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.group.withdraw_moderator_offer(group_id, user_id))
 
-        サークル管理人の権限を引き継ぎます
+    def withdraw_ownership_offer(self, group_id: int, user_id: int) -> Response:
+        """サークル管理人のオファーを取り消す
 
+        Args:
+            group_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.take_over_group_ownership(group_id)
+        return asyncio.run(self.group.withdraw_ownership_offer(group_id, user_id))
 
-    def unban_group_member(self, group_id: int, user_id: int) -> dict:
+    # ---------- auth api ----------
+
+    def change_email(self, **params) -> LoginUpdateResponse:
+        """メールアドレスを変更する
+
+        Args:
+            email (str):
+            password (str):
+            email_grant_token (str, optional):
+
+        Returns:
+            LoginUpdateResponse:
         """
+        return asyncio.run(self.auth.change_email(**params))
 
-        特定のサークルメンバーの追放を解除します
+    def change_password(self, **params) -> LoginUpdateResponse:
+        """パスワードを変更する
 
+        Args:
+            current_password (str):
+            new_password (str):
+
+        Returns:
+            LoginUpdateResponse:
         """
-        return self.GroupAPI.unban_group_member(group_id, user_id)
+        return asyncio.run(self.auth.change_password(**params))
 
-    def update_group(
-        self,
-        group_id: int,
-        topic: str,
-        description: Optional[str] = None,
-        secret: Optional[bool] = None,
-        hide_reported_posts: Optional[bool] = None,
-        hide_conference_call: Optional[bool] = None,
-        is_private: Optional[bool] = None,
-        only_verified_age: Optional[bool] = None,
-        only_mobile_verified: Optional[bool] = None,
-        call_timeline_display: Optional[bool] = None,
-        allow_ownership_transfer: Optional[bool] = None,
-        allow_thread_creation_by: Optional[str] = None,
-        gender: Optional[int] = None,
-        generation_groups_limit: Optional[int] = None,
-        group_category_id: Optional[int] = None,
-        cover_image_filename: Optional[str] = None,
-        sub_category_id: Optional[str] = None,
-        hide_from_game_eight: Optional[bool] = None,
-        allow_members_to_post_media: Optional[bool] = None,
-        allow_members_to_post_url: Optional[bool] = None,
-        guidelines: Optional[str] = None,
-    ) -> Group:
+    def get_token(self, **params) -> TokenResponse:
+        """認証トークンを取得する
+
+        Args:
+            grant_type (str):
+            refresh_token (str, optional):
+            email (str, optional):
+            password (str, optional):
+
+        Returns:
+            TokenResponse:
         """
+        return asyncio.run(self.auth.get_token(**params))
 
-        サークルを編集します
+    def login(
+        self, email: str, password: str, two_fa_code: Optional[str] = None
+    ) -> LoginUserResponse:
+        """メールアドレスでログインする
 
+        Args:
+            email (str):
+            password (str):
+            two_fa_code (str, optional):
+
+        Returns:
+            LoginUserResponse:
         """
-        return self.GroupAPI.update_group(
-            group_id,
-            topic,
-            description,
-            secret,
-            hide_reported_posts,
-            hide_conference_call,
-            is_private,
-            only_verified_age,
-            only_mobile_verified,
-            call_timeline_display,
-            allow_ownership_transfer,
-            allow_thread_creation_by,
-            gender,
-            generation_groups_limit,
-            group_category_id,
-            cover_image_filename,
-            sub_category_id,
-            hide_from_game_eight,
-            allow_members_to_post_media,
-            allow_members_to_post_url,
-            guidelines,
-        ).group
+        return asyncio.run(self.auth.login(email, password, two_fa_code))
 
-    def withdraw_moderator_offer(self, group_id: int, user_id: int) -> dict:
+    def resend_confirm_email(self) -> Response:
+        """確認メールを再送信する
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.auth.resend_confirm_email())
 
-        サークル副管理人のオファーを取り消します
+    def restore_user(self, **params) -> LoginUserResponse:
+        """ユーザーを復元する
 
+        Args:
+            user_id (int):
+
+        Returns:
+            LoginUserResponse:
         """
-        return self.GroupAPI.withdraw_moderator_offer(group_id, user_id)
+        return asyncio.run(self.auth.restore_user(**params))
 
-    def withdraw_ownership_offer(self, group_id: int, user_id: int) -> dict:
+    def save_account_with_email(self, **params) -> LoginUpdateResponse:
+        """メールアドレスでアカウントを保存する
+
+        Args:
+            email (str):
+            password (str, optional):
+            current_password (str, optional):
+            email_grant_token (str, optional):
+
+        Returns:
+            LoginUpdateResponse:
         """
+        return asyncio.run(self.auth.save_account_with_email(**params))
 
-        サークル管理人のオファーを取り消します
+    # ---------- misc api ----------
 
+    def accept_policy_agreement(self, agreement_type: str) -> Response:
+        """利用規約、ポリシー同意書に同意する
+
+        Args:
+            agreement_type (str):
+
+        Returns:
+            Response:
         """
-        return self.GroupAPI.withdraw_ownership_offer(group_id, user_id)
+        return asyncio.run(self.misc.accept_policy_agreement(agreement_type))
 
-    # -LOGIN
+    def send_verification_code(self, email: str, intent: str, locale="ja") -> Response:
+        """メールアドレス認証コードを送信する
 
-    def change_password(
-        self, current_password: str, new_password: str
-    ) -> LoginUpdateResponse:
+        Args:
+            email (str):
+            intent (str):
+            locale (str):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.misc.send_verification_code(email, intent, locale))
 
-        パスワードを変更します
+    def get_email_grant_token(self, **params) -> EmailGrantTokenResponse:
+        """メールアドレス認証トークンを取得する
 
+        Args:
+            code (int):
+            email (str):
+
+        Returns:
+            EmailGrantTokenResponse:
         """
-        return self.AuthAPI.change_password(current_password, new_password)
-
-    def get_token(
-        self,
-        grant_type: str,
-        refresh_token: Optional[str] = None,
-        email: Optional[str] = None,
-        password: Optional[str] = None,
-    ) -> TokenResponse:
-        """
-
-        トークンを再発行します
-
-        """
-        return self.AuthAPI.get_token(grant_type, refresh_token, email, password)
-
-    def login(self, email: str, password: str) -> LoginUserResponse:
-        """
-
-        メールアドレスでログインします
-
-        """
-        return self._prepare(email, password)
-
-    def logout(self) -> dict:
-        """
-
-        ログアウトします
-
-        """
-        return self.AuthAPI.logout()
-
-    def resend_confirm_email(self) -> dict:
-        """
-
-        確認メールを再送信します
-
-        """
-        return self.AuthAPI.resend_confirm_email()
-
-    def restore_user(self, user_id: int) -> LoginUserResponse:
-        """
-
-        ユーザーを復元します
-
-        """
-        return self.AuthAPI.restore_user(user_id)
-
-    def register_device_token(
-        self,
-        device_token: str,
-        device_type: str,
-        os_version: str,
-        app_version: str,
-        screen_resolution: str,
-        screen_density: str,
-        device_model: str,
-        appsflyer_id: str,
-        advertising_id: Optional[str] = None,
-    ) -> RegisterDeviceTokenResponse:
-        """
-
-        デバイストークンを登録します
-
-        """
-        return self.AuthAPI.register_device_token(
-            device_token,
-            device_type,
-            os_version,
-            app_version,
-            screen_resolution,
-            screen_density,
-            device_model,
-            appsflyer_id,
-            advertising_id,
-        )
-
-    def revoke_tokens(self) -> dict:
-        """
-
-        トークンを無効化します
-
-        """
-        return self.AuthAPI.revoke_tokens()
-
-    def save_account_with_email(
-        self,
-        email: str,
-        password: Optional[str] = None,
-        current_password: Optional[str] = None,
-        email_grant_token: Optional[str] = None,
-    ) -> LoginUpdateResponse:
-        """
-
-        メールアドレスでアカウントを保存します
-
-        """
-        return self.AuthAPI.save_account_with_email(
-            email, password, current_password, email_grant_token
-        )
-
-    # -MISC
-
-    def accept_policy_agreement(self, type: str):
-        """
-
-        利用規約、ポリシー同意書に同意します
-
-        """
-        return self.MiscAPI.accept_policy_agreement(type)
-
-    def send_verification_code(self, email: str, intent: str, locale="ja"):
-        """
-
-        認証コードを送信します
-
-        """
-        return self.MiscAPI.send_verification_code(email, intent, locale)
-
-    def get_email_grant_token(self, code: int, email: str) -> str:
-        """
-
-        email_grant_tokenを取得します
-
-        """
-        return self.MiscAPI.get_email_grant_token(code, email).email_grant_token
+        return asyncio.run(self.misc.get_email_grant_token(**params))
 
     def get_email_verification_presigned_url(
-        self, email: str, locale: str, intent: Optional[str] = None
-    ) -> str:
+        self, email: str, locale: str = "ja", intent: Optional[str] = None
+    ) -> EmailVerificationPresignedUrlResponse:
+        """メールアドレス確認用の署名付きURLを取得する
+
+        Args:
+            email (str):
+            locale (str):
+            intent (str, optional):
+
+        Returns:
+            EmailVerificationPresignedUrlResponse:
         """
-
-        メールアドレス確認用の署名付きURLを取得します
-
-        """
-        return self.MiscAPI.get_email_verification_presigned_url(email, locale, intent)
-
-    def get_file_upload_presigned_urls(
-        self, file_names: list[str]
-    ) -> list[PresignedUrl]:
-        """
-
-        ファイルアップロード用の署名付きURLを取得します
-
-        """
-        return self.MiscAPI.get_file_upload_presigned_urls(file_names).presigned_urls
-
-    # def get_id_checker_presigned_url(
-    #         self,
-    #         model: str,
-    #         action: str,
-    #         **params
-    # ) -> str:
-    #     return get_id_checker_presigned_url(self, model, action, **params)
-
-    def get_old_file_upload_presigned_url(self, video_file_name: str) -> str:
-        """
-
-        動画ファイルアップロード用の署名付きURLを取得します
-
-        """
-        return self.MiscAPI.get_old_file_upload_presigned_url(
-            video_file_name
-        ).presigned_url
-
-    def get_policy_agreements(self) -> PolicyAgreementsResponse:
-        """
-
-        利用規約、ポリシー同意書に同意しているかどうかを取得します
-
-        """
-        return self.MiscAPI.get_policy_agreements()
-
-    def get_web_socket_token(self) -> str:
-        """
-
-        Web Socket Tokenを取得します
-
-        """
-        return self.MiscAPI.get_web_socket_token().token
-
-    def upload_image(self, image_paths: list[str], image_type: str) -> list[Attachment]:
-        """
-
-        画像をアップロードして、サーバー上のファイル名のリストを返します。
-
-        Parameteres
-        -----------
-
-            - image_path: list[str] - (required): 画像パスのリスト
-            - image_type: str - (required): 画像の種類
-
-        Examples
-        --------
-
-        投稿に画像を付与する場合
-
-        >>> # サーバー上にアップロード
-        >>> attachments = api.upload_image(
-        >>>     image_type=yaylib.IMAGE_TYPE_POST,
-        >>>     image_paths=["./test.jpg"],
-        >>> )
-        >>> # サーバー上のファイル名を指定
-        >>> api.create_post(
-        >>>     "Hello with yaylib!",
-        >>>     attachment_filename=attachments[0].filename
-        >>> )
-
-        """
-        return self.MiscAPI.upload_image(image_paths, image_type)
-
-    def upload_video(self, video_path: str) -> str:
-        """
-
-        動画をアップロードして、サーバー上のファイル名を返します。
-
-        Parameteres
-        -----------
-
-            - video_path: str - (required): 動画ファイルの場所
-
-        Examples
-        --------
-
-        投稿に動画を付与する場合
-
-        >>> # サーバー上にアップロード
-        >>> filename = api.upload_video(
-        >>>     video_path="./example.mp4",
-        >>> )
-        >>> # サーバー上のファイル名を指定
-        >>> api.create_post(
-        >>>     "Hello with yaylib!",
-        >>>     video_file_name=filename
-        >>> )
-
-        """
-        return self.MiscAPI.upload_video(video_path)
-
-    def get_app_config(self) -> ApplicationConfig:
-        """
-
-        アプリケーションの設定情報を取得します
-
-        """
-        return self.MiscAPI.get_app_config().app
-
-    def get_banned_words(self, country_code: str = "jp") -> list[BanWord]:
-        """
-
-        禁止ワードの一覧を取得します
-
-        """
-        return self.MiscAPI.get_banned_words(country_code).ban_words
-
-    def get_popular_words(self, country_code: str = "jp") -> list[PopularWord]:
-        """
-
-        人気のワードの一覧を取得します
-
-        """
-        return self.MiscAPI.get_popular_words(country_code).popular_words
-
-    # -POST
-
-    def add_bookmark(self, user_id: int, post_id: int) -> BookmarkPostResponse:
-        """
-
-        ブックマークに追加します
-
-        """
-        return self.PostAPI.add_bookmark(user_id, post_id)
-
-    def add_group_highlight_post(self, group_id: int, post_id: int) -> dict:
-        """
-
-        投稿をグループのまとめに追加します
-
-        """
-        return self.PostAPI.add_group_highlight_post(group_id, post_id)
-
-    def create_call_post(
-        self,
-        text: Optional[str] = None,
-        font_size: Optional[int] = None,
-        color: Optional[int] = None,
-        group_id: Optional[int] = None,
-        call_type: Optional[str] = None,
-        category_id: Optional[int] = None,
-        game_title: Optional[str] = None,
-        joinable_by: Optional[str] = None,
-        message_tags: Optional[list] = [],
-        attachment_filename: Optional[str] = None,
-        attachment_2_filename: Optional[str] = None,
-        attachment_3_filename: Optional[str] = None,
-        attachment_4_filename: Optional[str] = None,
-        attachment_5_filename: Optional[str] = None,
-        attachment_6_filename: Optional[str] = None,
-        attachment_7_filename: Optional[str] = None,
-        attachment_8_filename: Optional[str] = None,
-        attachment_9_filename: Optional[str] = None,
-    ) -> ConferenceCall:
-        """
-
-        通話の投稿を作成します
-
-        """
-        return self.PostAPI.create_call_post(
-            text,
-            font_size,
-            color,
-            group_id,
-            call_type,
-            category_id,
-            game_title,
-            joinable_by,
-            message_tags,
-            attachment_filename,
-            attachment_2_filename,
-            attachment_3_filename,
-            attachment_4_filename,
-            attachment_5_filename,
-            attachment_6_filename,
-            attachment_7_filename,
-            attachment_8_filename,
-            attachment_9_filename,
-        ).conference_call
-
-    def pin_group_post(self, post_id: int, group_id: int) -> dict:
-        """
-
-        グループの投稿をピンします
-
-        """
-        return self.PostAPI.create_group_pin_post(post_id, group_id)
-
-    def pin_post(self, post_id: int) -> dict:
-        """
-
-        投稿をピンします
-
-        """
-        return self.PostAPI.create_pin_post(post_id)
-
-    def mention(self, user_id: int) -> str:
-        """
-
-        メンション用文字列を返します
-
-        """
-        return self.PostAPI.mention(user_id)
-
-    def create_post(
-        self,
-        text: Optional[str] = None,
-        font_size: Optional[int] = 0,
-        color: Optional[int] = 0,
-        in_reply_to: Optional[int] = None,
-        group_id: Optional[int] = None,
-        mention_ids: Optional[list[int]] = None,
-        choices: Optional[list[str]] = None,
-        shared_url: Optional[str] = None,
-        message_tags: Optional[list] = [],
-        attachment_filename: Optional[str] = None,
-        attachment_2_filename: Optional[str] = None,
-        attachment_3_filename: Optional[str] = None,
-        attachment_4_filename: Optional[str] = None,
-        attachment_5_filename: Optional[str] = None,
-        attachment_6_filename: Optional[str] = None,
-        attachment_7_filename: Optional[str] = None,
-        attachment_8_filename: Optional[str] = None,
-        attachment_9_filename: Optional[str] = None,
-        video_file_name: Optional[str] = None,
-    ) -> Post:
-        """
-
-        投稿を作成します
-
-        """
-        return self.PostAPI.create_post(
-            text,
-            font_size,
-            color,
-            in_reply_to,
-            group_id,
-            mention_ids,
-            choices,
-            shared_url,
-            message_tags,
-            attachment_filename,
-            attachment_2_filename,
-            attachment_3_filename,
-            attachment_4_filename,
-            attachment_5_filename,
-            attachment_6_filename,
-            attachment_7_filename,
-            attachment_8_filename,
-            attachment_9_filename,
-            video_file_name,
+        return asyncio.run(
+            self.misc.get_email_verification_presigned_url(email, locale, intent)
         )
 
+    def get_file_upload_presigned_urls(
+        self, file_names: List[str]
+    ) -> PresignedUrlsResponse:
+        """ファイルアップロード用の署名付きURLを取得する
+
+        Args:
+            file_names (List[str]):
+
+        Returns:
+            PresignedUrlsResponse:
+        """
+        return asyncio.run(self.misc.get_file_upload_presigned_urls(file_names))
+
+    def get_id_checker_presigned_url(
+        self, model: str, action: str, **params
+    ) -> IdCheckerPresignedUrlResponse:
+        """身分証明用の署名付きURLを取得する
+
+        Args:
+            model (str):
+            action (str):
+
+        Returns:
+            IdCheckerPresignedUrlResponse:
+        """
+        return asyncio.run(
+            self.misc.get_id_checker_presigned_url(model, action, **params)
+        )
+
+    def get_old_file_upload_presigned_url(
+        self, video_file_name: str
+    ) -> PresignedUrlResponse:
+        """旧版ファイルアップロード用の署名付きURLを取得する
+
+        Args:
+            video_file_name (str):
+
+        Returns:
+            PresignedUrlResponse:
+        """
+        return asyncio.run(self.misc.get_old_file_upload_presigned_url(video_file_name))
+
+    def get_policy_agreed(self) -> PolicyAgreementsResponse:
+        """利用規約、ポリシー同意書に同意しているかどうかを取得する
+
+        Returns:
+            PolicyAgreementsResponse:
+        """
+        return asyncio.run(self.misc.get_policy_agreed())
+
+    def get_web_socket_token(self) -> WebSocketTokenResponse:
+        """WebSocket トークンを取得する
+
+        Returns:
+            WebSocketTokenResponse:
+        """
+        return asyncio.run(self.misc.get_web_socket_token())
+
+    def upload_image(self, image_paths: List[str], image_type: str) -> List[Attachment]:
+        """画像をアップロードして、サーバー上のファイルのリストを取得する
+
+        Examples:
+            投稿に画像を付与する場合
+
+            >>> # サーバー上にアップロード
+            >>> attachments = api.upload_image(
+            >>>     image_type=yaylib.ImageType.POST,
+            >>>     image_paths=["./example.jpg"],
+            >>> )
+            >>> # サーバー上のファイル名を指定
+            >>> api.create_post(
+            >>>     "Hello with yaylib!",
+            >>>     attachment_filename=attachments[0].filename
+            >>> )
+
+        Args:
+            image_paths (List[str]): 画像ファイルのパスのリスト
+            image_type (str): 画像の種類
+
+        Raises:
+            ValueError: 画像タイプやフォーマットが不正な場合
+
+        Returns:
+            List[Attachment]: サーバー上のファイル情報
+        """
+        return asyncio.run(self.misc.upload_image(image_paths, image_type))
+
+    def upload_video(self, video_path: str) -> str:
+        """動画をアップロードして、サーバー上のファイル名を取得する
+
+        Examples:
+            投稿に動画を付与する場合
+
+            >>> # サーバー上にアップロード
+            >>> filename = client.upload_video("./example.mp4")
+            >>> # サーバー上のファイル名を指定
+            >>> api.create_post(
+            >>>     "Hello with yaylib!",
+            >>>     video_file_name=filename
+            >>> )
+
+        Args:
+            video_path (str): 動画ファイルのパス
+
+        Raises:
+            ValueError: 動画フォーマットが不正な場合
+
+        Returns:
+            str: サーバー上のファイル名
+        """
+        return asyncio.run(self.misc.upload_video(video_path))
+
+    def get_app_config(self) -> ApplicationConfigResponse:
+        """アプリケーションのメタデータを取得する
+
+        Returns:
+            ApplicationConfigResponse:
+        """
+        return asyncio.run(self.misc.get_app_config())
+
+    def get_banned_words(self, country_code: str = "jp") -> BanWordsResponse:
+        """禁止ワードの一覧を取得する
+
+        Args:
+            country_code (str, optional):
+
+        Returns:
+            BanWordsResponse:
+        """
+        return asyncio.run(self.misc.get_banned_words(country_code))
+
+    def get_popular_words(self, country_code: str = "jp") -> PopularWordsResponse:
+        """人気ワードの一覧を取得する
+
+        Args:
+            country_code (str, optional):
+
+        Returns:
+            PopularWordsResponse:
+        """
+        return asyncio.run(self.misc.get_popular_words(country_code))
+
+    # ---------- post api ----------
+
+    def add_bookmark(self, user_id: int, post_id: int) -> BookmarkPostResponse:
+        """ブックマークに追加する
+
+        Args:
+            user_id (int):
+            post_id (int):
+
+        Returns:
+            BookmarkPostResponse:
+        """
+        return asyncio.run(self.post.add_bookmark(user_id, post_id))
+
+    def add_group_highlight_post(self, group_id: int, post_id: int) -> Response:
+        """投稿をグループのまとめに追加する
+
+        Args:
+            group_id (int):
+            post_id (int):
+
+        Returns:
+            Response:
+        """
+        return asyncio.run(self.post.add_group_highlight_post(group_id, post_id))
+
+    def create_call_post(
+        self, text: Optional[str] = None, **params
+    ) -> CreatePostResponse:
+        """通話の投稿を作成する
+
+        Args:
+            text (str, optional):
+            font_size (int, optional):
+            color (int, optional):
+            group_id (int, optional):
+            call_type (str, optional):
+            category_id (int, optional):
+            game_title (str, optional):
+            joinable_by (str, optional):
+            message_tags (List, optional):
+            attachment_filename (str, optional):
+            attachment_2_filename (str, optional):
+            attachment_3_filename (str, optional):
+            attachment_4_filename (str, optional):
+            attachment_5_filename (str, optional):
+            attachment_6_filename (str, optional):
+            attachment_7_filename (str, optional):
+            attachment_8_filename (str, optional):
+            attachment_9_filename (str, optional):
+
+        Returns:
+            CreatePostResponse:
+        """
+        return asyncio.run(self.post.create_call_post(text, **params))
+
+    def pin_group_post(self, post_id: int, group_id: int) -> Response:
+        """サークルの投稿をピン留めする
+
+        Args:
+            post_id (int):
+            group_id (int):
+
+        Returns:
+            Response:
+        """
+        return asyncio.run(self.post.pin_group_post(post_id, group_id))
+
+    def pin_post(self, post_id: int) -> Response:
+        """プロフィールに投稿をピン留めする
+
+        Args:
+            post_id (int):
+
+        Returns:
+            Response:
+        """
+        return asyncio.run(self.post.pin_post(post_id))
+
+    def create_post(self, text: Optional[str] = None, **params) -> Post:
+        """投稿を作成する
+
+        Args:
+            text (str, optional):
+            font_size (int, optional): . Defaults to 0.
+            color (int, optional): . Defaults to 0.
+            in_reply_to (int, optional):
+            group_id (int, optional):
+            mention_ids (List[int], optional):
+            choices (List[str], optional):
+            shared_url (str, optional):
+            message_tags (List, optional):
+            attachment_filename (str, optional):
+            attachment_2_filename (str, optional):
+            attachment_3_filename (str, optional):
+            attachment_4_filename (str, optional):
+            attachment_5_filename (str, optional):
+            attachment_6_filename (str, optional):
+            attachment_7_filename (str, optional):
+            attachment_8_filename (str, optional):
+            attachment_9_filename (str, optional):
+            video_file_name (str, optional):
+
+        Returns:
+            Post:
+        """
+        return asyncio.run(self.post.create_post(text, **params))
+
     def create_repost(
-        self,
-        post_id: int,
-        text: Optional[str] = None,
-        font_size: Optional[int] = 0,
-        color: Optional[int] = 0,
-        in_reply_to: Optional[int] = None,
-        group_id: Optional[int] = None,
-        mention_ids: Optional[list[int]] = None,
-        choices: Optional[list[str]] = None,
-        shared_url: Optional[str] = None,
-        message_tags: Optional[list] = [],
-        attachment_filename: Optional[str] = None,
-        attachment_2_filename: Optional[str] = None,
-        attachment_3_filename: Optional[str] = None,
-        attachment_4_filename: Optional[str] = None,
-        attachment_5_filename: Optional[str] = None,
-        attachment_6_filename: Optional[str] = None,
-        attachment_7_filename: Optional[str] = None,
-        attachment_8_filename: Optional[str] = None,
-        attachment_9_filename: Optional[str] = None,
-        video_file_name: Optional[str] = None,
-    ) -> Post:
-        """
+        self, post_id: int, text: Optional[str] = None, **params
+    ) -> CreatePostResponse:
+        """投稿を(´∀｀∩)↑age↑する
 
-        投稿を(´∀｀∩)↑age↑します
+        Args:
+            post_id (int):
+            text (str, optional):
+            font_size (int, optional):
+            color (int, optional):
+            in_reply_to (int, optional):
+            group_id (int, optional):
+            mention_ids (List[int], optional):
+            choices (List[str], optional):
+            shared_url (Dict[str, str  |  int], optional):
+            message_tags (List, optional):
+            attachment_filename (str, optional):
+            attachment_2_filename (str, optional):
+            attachment_3_filename (str, optional):
+            attachment_4_filename (str, optional):
+            attachment_5_filename (str, optional):
+            attachment_6_filename (str, optional):
+            attachment_7_filename (str, optional):
+            attachment_8_filename (str, optional):
+            attachment_9_filename (str, optional):
+            video_file_name (str, optional):
 
+        Returns:
+            CreatePostResponse:
         """
-        return self.PostAPI.create_repost(
-            post_id,
-            text,
-            font_size,
-            color,
-            in_reply_to,
-            group_id,
-            mention_ids,
-            choices,
-            shared_url,
-            message_tags,
-            attachment_filename,
-            attachment_2_filename,
-            attachment_3_filename,
-            attachment_4_filename,
-            attachment_5_filename,
-            attachment_6_filename,
-            attachment_7_filename,
-            attachment_8_filename,
-            attachment_9_filename,
-            video_file_name,
-        ).post
+        return asyncio.run(self.post.create_repost(post_id, text, **params))
 
     def create_share_post(
         self,
         shareable_type: str,
         shareable_id: int,
         text: Optional[str] = None,
-        font_size: Optional[int] = None,
-        color: Optional[int] = None,
-        group_id: Optional[int] = None,
+        **params,
     ) -> Post:
-        """
+        """シェア投稿を作成する
 
-        シェア投稿を作成します
+        Args:
+            shareable_type (str):
+            shareable_id (int):
+            text (str, optional):
+            font_size (int, optional):
+            color (int, optional):
+            group_id (int, optional):
 
+        Returns:
+            Post:
         """
-        return self.PostAPI.create_share_post(
-            shareable_type, shareable_id, text, font_size, color, group_id
+        return asyncio.run(
+            self.post.create_share_post(shareable_type, shareable_id, text, **params)
         )
 
     def create_thread_post(
-        self,
-        post_id: int,
-        text: Optional[str] = None,
-        font_size: Optional[int] = 0,
-        color: Optional[int] = 0,
-        in_reply_to: Optional[int] = None,
-        group_id: Optional[int] = None,
-        mention_ids: Optional[list[int]] = None,
-        choices: Optional[list[str]] = None,
-        shared_url: Optional[str] = None,
-        message_tags: Optional[list] = [],
-        attachment_filename: Optional[str] = None,
-        attachment_2_filename: Optional[str] = None,
-        attachment_3_filename: Optional[str] = None,
-        attachment_4_filename: Optional[str] = None,
-        attachment_5_filename: Optional[str] = None,
-        attachment_6_filename: Optional[str] = None,
-        attachment_7_filename: Optional[str] = None,
-        attachment_8_filename: Optional[str] = None,
-        attachment_9_filename: Optional[str] = None,
-        video_file_name: Optional[str] = None,
+        self, post_id: int, text: Optional[str] = None, **params
     ) -> Post:
+        """スレッドの投稿を作成する
+
+        Args:
+            thread_id (int):
+            text (str, optional):
+            font_size (int, optional):
+            color (int, optional):
+            in_reply_to (int, optional):
+            group_id (int, optional):
+            mention_ids (List[int], optional):
+            choices (list[str], optional):
+            shared_url (Dict[str, str  |  int], optional):
+            message_tags (List, optional):
+            attachment_filename (str, optional):
+            attachment_2_filename (str, optional):
+            attachment_3_filename (str, optional):
+            attachment_4_filename (str, optional):
+            attachment_5_filename (str, optional):
+            attachment_6_filename (str, optional):
+            attachment_7_filename (str, optional):
+            attachment_8_filename (str, optional):
+            attachment_9_filename (str, optional):
+            video_file_name (str, optional):
+
+        Returns:
+            Post:
         """
+        return asyncio.run(self.post.create_thread_post(post_id, text, **params))
 
-        スレッドの投稿を作成します
+    def delete_all_posts(self) -> Response:
+        """すべての自分の投稿を削除する
 
+        Returns:
+            Response:
         """
-        return self.PostAPI.create_thread_post(
-            post_id,
-            text,
-            font_size,
-            color,
-            in_reply_to,
-            group_id,
-            mention_ids,
-            choices,
-            shared_url,
-            message_tags,
-            attachment_filename,
-            attachment_2_filename,
-            attachment_3_filename,
-            attachment_4_filename,
-            attachment_5_filename,
-            attachment_6_filename,
-            attachment_7_filename,
-            attachment_8_filename,
-            attachment_9_filename,
-            video_file_name,
-        )
+        return asyncio.run(self.post.delete_all_posts())
 
-    def delete_all_post(self) -> dict:
+    def unpin_group_post(self, group_id: int) -> Response:
+        """グループのピン投稿を解除する
+
+        Args:
+            group_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.post.unpin_group_post(group_id))
 
-        すべての自分の投稿を削除します
+    def unpin_post(self, post_id: int) -> Response:
+        """プロフィール投稿のピンを解除する
 
+        Args:
+            post_id (int):
+
+        Returns:
+            Response:
         """
-        return self.PostAPI.delete_all_post()
+        return asyncio.run(self.post.unpin_post(post_id))
 
-    def unpin_group_post(self, group_id: int) -> dict:
+    def get_bookmark(self, user_id: int, **params) -> PostsResponse:
+        """ブックマークを取得する
+
+        Args:
+            user_id (int):
+            from_str (str, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        グループのピン投稿を解除します
-
-        """
-        return self.PostAPI.delete_group_pin_post(group_id)
-
-    def unpin_post(self, post_id: int) -> dict:
-        """
-
-        ピン投稿を削除します
-
-        """
-        return self.PostAPI.delete_pin_post(post_id)
-
-    def get_bookmark(
-        self,
-        user_id: int,
-        from_str: Optional[str] = None,
-    ) -> PostsResponse:
-        """
-
-        ブックマークを取得します
-
-        """
-        return self.PostAPI.get_bookmark(user_id, from_str)
+        return asyncio.run(self.post.get_bookmark(user_id, **params))
 
     def get_timeline_calls(self, **params) -> PostsResponse:
+        """誰でも通話を取得する
+
+        Args:
+            group_id (int, optional):
+            from_timestamp (int, optional):
+            number (int, optional):
+            category_id (int, optional):
+            call_type (str, optional): Defaults to "voice".
+            include_circle_call (bool, optional):
+            cross_generation (bool, optional):
+            exclude_recent_gomimushi (bool, optional):
+            shared_interest_categories (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        誰でも通話を取得します
-
-        Parameters
-        ----------
-
-            - group_id: int = None
-            - from_timestamp: int = None
-            - number: int = None
-            - category_id: int = None
-            - call_type: str = "voice"
-            - include_circle_call: bool = None
-            - cross_generation: bool = None
-            - exclude_recent_gomimushi: bool = None
-            - shared_interest_categories: bool = None
-
-        """
-        return self.PostAPI.get_timeline_calls(**params)
+        return asyncio.run(self.post.get_timeline_calls(**params))
 
     def get_conversation(self, conversation_id: int, **params) -> PostsResponse:
+        """リプライを含める投稿の会話を取得する
+
+        Args:
+            conversation_id (int):
+            group_id (int, optional):
+            thread_id (int, optional):
+            from_post_id (int, optional):
+            number (int, optional):
+            reverse (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
+        return asyncio.run(self.post.get_conversation(conversation_id, **params))
 
-        リプライを含める投稿の会話を取得します
+    def get_conversation_root_posts(self, post_ids: List[int]) -> PostsResponse:
+        """会話の原点の投稿を取得する
 
-        Parameters
-        ----------
+        Args:
+            post_ids (List[int]):
 
-            - conversation_id: int
-            - group_id: int = None
-            - thread_id: int = None
-            - from_post_id: int = None
-            - number: int = 50
-            - reverse: bool = True
-
+        Returns:
+            PostsResponse:
         """
-        return self.PostAPI.get_conversation(conversation_id, **params)
-
-    def get_conversation_root_posts(self, post_ids: list[int]) -> PostsResponse:
-        """
-
-        会話の原点の投稿を取得します
-
-        """
-        return self.PostAPI.get_conversation_root_posts(post_ids)
+        return asyncio.run(self.post.get_conversation_root_posts(post_ids))
 
     def get_following_call_timeline(self, **params) -> PostsResponse:
+        """フォロー中の通話を取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional):
+            category_id (int, optional):
+            include_circle_call (bool, optional):
+            exclude_recent_gomimushi (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        フォロー中の通話を取得します
-
-        Parameters
-        ----------
-
-            - from_timestamp: int = None
-            - number: int = None
-            - category_id: int = None
-            - call_type: str = None
-            - include_circle_call: bool = None
-            - exclude_recent_gomimushi: bool = None
-
-        """
-        return self.PostAPI.get_following_call_timeline(**params)
+        return asyncio.run(self.post.get_following_call_timeline(**params))
 
     def get_following_timeline(self, **params) -> PostsResponse:
+        """フォロー中のタイムラインを取得する
+
+        Args:
+            from_str (str, optional):
+            only_root (bool, optional):
+            order_by (str, optional):
+            number (int, optional):
+            mxn (int, optional):
+            reduce_selfie (bool, optional):
+            custom_generation_range (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        フォロー中のタイムラインを取得します
-
-        Parameters
-        ----------
-
-            - from_str: str = None
-            - only_root: bool = None
-            - order_by: str = None
-            - number: int = None
-            - mxn: int = None
-            - reduce_selfie: bool = None
-            - custom_generation_range: bool = None
-
-        """
-        return self.PostAPI.get_following_timeline(**params)
+        return asyncio.run(self.post.get_following_timeline(**params))
 
     def get_group_highlight_posts(self, group_id: int, **params) -> PostsResponse:
+        """グループのまとめ投稿を取得する
+
+        Args:
+            group_id (int):
+            from_post (int, optional):
+            number (int, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        グループのハイライト投稿を取得します
-
-        Parameters
-        ----------
-
-            - group_id: int
-            - from_post: int = None
-            - number: int = None
-
-        """
-        return self.PostAPI.get_group_highlight_posts(group_id, **params)
+        return asyncio.run(self.post.get_group_highlight_posts(group_id, **params))
 
     def get_group_timeline_by_keyword(
         self, group_id: int, keyword: str, **params
     ) -> PostsResponse:
+        """グループの投稿をキーワードで検索する
+
+        Args:
+            group_id (int):
+            keyword (str):
+            from_post_id (int, optional):
+            number (int, optional):
+            only_thread_posts (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        グループの投稿をキーワードで検索します
-
-        Parameters
-        ----------
-
-            - group_id: int
-            - keyword: str
-            - from_post_id: int = None
-            - number: int = None
-            - only_thread_posts: bool = False
-
-        """
-        return self.PostAPI.get_group_timeline_by_keyword(group_id, keyword, **params)
+        return asyncio.run(
+            self.post.get_group_timeline_by_keyword(group_id, keyword, **params)
+        )
 
     def get_group_timeline(self, group_id: int, **params) -> PostsResponse:
+        """グループのタイムラインを取得する
+
+        Args:
+            group_id (int):
+            from_post_id (int, optional):
+            reverse (bool, optional):
+            post_type (str, optional):
+            number (int, optional):
+            only_root (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        グループのタイムラインを取得します
-
-        Parameters
-        ----------
-
-            - group_id: int
-            - from_post_id: int
-            - reverse: bool
-            - post_type: str
-            - number: int
-            - only_root: bool
-
-        """
-        return self.PostAPI.get_group_timeline(group_id, **params)
+        return asyncio.run(self.post.get_group_timeline(group_id, **params))
 
     def get_timeline_by_hashtag(self, hashtag: str, **params) -> PostsResponse:
+        """ハッシュタグでタイムラインを検索する
+
+        Args:
+            hashtag (str):
+            from_post_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        ハッシュタグでタイムラインを検索します
-
-        Parameters
-        ----------
-
-            - hashtag: str - (required)
-            - from_post_id: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.PostAPI.get_timeline_by_hashtag(hashtag, **params)
+        return asyncio.run(self.post.get_timeline_by_hashtag(hashtag, **params))
 
     def get_my_posts(self, **params) -> PostsResponse:
+        """自分の投稿を取得する
+
+        Args:
+            from_post_id (int, optional):
+            number (int, optional):
+            include_group_post (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
+        return asyncio.run(self.post.get_my_posts(**params))
 
-        自分の投稿を取得します
+    def get_post(self, post_id: int) -> PostResponse:
+        """投稿の詳細を取得する
 
-        Parameters
-        ----------
+        Args:
+            post_id (int):
 
-            - from_post_id: int - (optional)
-            - number: int - (optional)
-            - include_group_post: bool - (optional)
-
+        Returns:
+            PostResponse:
         """
-        return self.PostAPI.get_my_posts(**params)
-
-    def get_post(self, post_id: int) -> Post:
-        """
-
-        投稿の詳細を取得します
-
-        """
-        return self.PostAPI.get_post(post_id).post
+        return asyncio.run(self.post.get_post(post_id))
 
     def get_post_likers(self, post_id: int, **params) -> PostLikersResponse:
+        """投稿にいいねしたユーザーを取得する
+
+        Args:
+            post_id (int):
+            from_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            PostLikersResponse:
         """
-
-        投稿にいいねしたユーザーを取得します
-
-        Parameters
-        ----------
-
-            - from_id: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.PostAPI.get_post_likers(post_id, **params)
+        return asyncio.run(self.post.get_post_likers(post_id, **params))
 
     def get_reposts(self, post_id: int, **params: int) -> PostsResponse:
+        """投稿の(´∀｀∩)↑age↑を取得する
+
+        Args:
+            post_id (int):
+            from_post_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            PostsResponse:
         """
+        return asyncio.run(self.post.get_reposts(post_id, **params))
 
-        投稿の(´∀｀∩)↑age↑を取得します
+    def get_posts(self, post_ids: List[int]) -> PostsResponse:
+        """複数の投稿を取得する
 
-        Parameters
-        ----------
+        Args:
+            post_ids (List[int]):
 
-            - post_id: int - (required)
-            - from_post_id: int - (optional)
-            - number: int - (optional)
-
+        Returns:
+            PostsResponse:
         """
-        return self.PostAPI.get_post_reposts(post_id, **params)
+        return asyncio.run(self.post.get_posts(post_ids))
 
-    def get_posts(self, post_ids: list[int]) -> PostsResponse:
+    def get_recommended_post_tags(self, **params) -> PostTagsResponse:
+        """おすすめのタグ候補を取得する
+
+        Args:
+            tag (str, optional):
+            save_recent_search (bool, optional):
+
+        Returns:
+            PostTagsResponse:
         """
-
-        複数の投稿を取得します
-
-        """
-        return self.PostAPI.get_posts(post_ids)
-
-    def get_recommended_post_tags(
-        self, tag: Optional[str] = None, save_recent_search: Optional[bool] = False
-    ) -> PostTagsResponse:
-        """
-
-        おすすめのタグ候補を取得します
-
-        """
-        return self.PostAPI.get_recommended_post_tags(tag, save_recent_search)
+        return asyncio.run(self.post.get_recommended_post_tags(**params))
 
     def get_recommended_posts(self, **params) -> PostsResponse:
+        """おすすめの投稿を取得する
+
+        Args:
+            experiment_num (int):
+            variant_num (int, optional):
+            number (int, optional):
+
+
+        Returns:
+            PostsResponse:
         """
-
-        おすすめの投稿を取得します
-
-        Parameters
-        ----------
-
-            - experiment_num: int
-            - variant_num: int
-            - number: int
-
-        """
-        return self.PostAPI.get_recommended_posts(**params)
+        return asyncio.run(self.post.get_recommended_posts(**params))
 
     def get_timeline_by_keyword(
         self,
         keyword: Optional[str] = None,
         **params,
     ) -> PostsResponse:
+        """キーワードでタイムラインを検索する
+
+        Args:
+            keyword (str, optional):
+            from_post_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        キーワードでタイムラインを検索します
-
-        Parameters
-        ----------
-
-            - keyword: str
-            - from_post_id: int
-            - number: int
-
-        """
-        return self.PostAPI.get_timeline_by_keyword(keyword, **params)
+        return asyncio.run(self.post.get_timeline_by_keyword(keyword, **params))
 
     def get_timeline(self, **params) -> PostsResponse:
+        """タイムラインを取得する
+
+        Args:
+            noreply_mode (bool, optional):
+            from_post_id (int, optional):
+            number (int, optional):
+            order_by (str, optional):
+            experiment_older_age_rules (bool, optional):
+            shared_interest_categories (bool, optional):
+            mxn (int, optional):
+            en (int, optional):
+            vn (int, optional):
+            reduce_selfie (bool, optional):
+            custom_generation_range (bool, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        タイムラインを取得します
-
-        Parameters
-        ----------
-
-            - noreply_mode: bool - (optional)
-            - from_post_id: int - (optional)
-            - number: int - (optional)
-            - order_by: str - (optional)
-            - experiment_older_age_rules: bool - (optional)
-            - shared_interest_categories: bool - (optional)
-            - mxn: int - (optional)
-            - en: int - (optional)
-            - vn: int - (optional)
-            - reduce_selfie: bool - (optional)
-            - custom_generation_range: bool - (optional)
-
-        """
-        return self.PostAPI.get_timeline(**params)
+        return asyncio.run(self.post.get_timeline(**params))
 
     def get_url_metadata(self, url: str) -> SharedUrl:
-        """
+        """URLのメタデータを取得する
 
-        URLのメタデータを取得します
+        Args:
+            url (str):
 
+        Returns:
+            SharedUrl:
         """
-        return self.PostAPI.get_url_metadata(url)
+        return asyncio.run(self.post.get_url_metadata(url))
 
     def get_user_timeline(self, user_id: int, **params) -> PostsResponse:
+        """ユーザーのタイムラインを取得する
+
+        Args:
+            user_id (int):
+            from_post_id (int, optional):
+            number (int, optional):
+            post_type (str, optional):
+
+        Returns:
+            PostsResponse:
         """
+        return asyncio.run(self.post.get_user_timeline(user_id, **params))
 
-        ユーザーのタイムラインを取得します
+    def like(self, post_ids: List[int]) -> LikePostsResponse:
+        """投稿にいいねする
 
-        Parameters
-        ----------
+        Args:
+            post_ids (List[int]):
 
-            - from_post_id: int - (optional)
-            - number: int - (optional)
-            - post_type: str - (optional)
-
+        Returns:
+            LikePostsResponse:
         """
-        return self.PostAPI.get_user_timeline(user_id, **params)
+        return asyncio.run(self.post.like(post_ids))
 
-    def like(self, post_ids: list[int]) -> LikePostsResponse:
+    def delete_bookmark(self, user_id: int, post_id: int) -> Response:
+        """ブックマークを削除する
+
+        Args:
+            user_id (int):
+            post_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.post.delete_bookmark(user_id, post_id))
 
-        投稿にいいねします
+    def delete_group_highlight_post(self, group_id: int, post_id: int) -> Response:
+        """サークルのまとめから投稿を解除する
 
-        ※ 一度にいいねできる投稿数は最大25個
+        Args:
+            group_id (int):
+            post_id (int):
 
+        Returns:
+            Response:
         """
-        return self.PostAPI.like_posts(post_ids)
+        return asyncio.run(self.post.delete_group_highlight_post(group_id, post_id))
 
-    def remove_bookmark(self, user_id: int, post_id: int) -> dict:
+    def delete_posts(self, post_ids: List[int]) -> Response:
+        """投稿を削除する
+
+        Args:
+            post_ids (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.post.delete_posts(post_ids))
 
-        ブックマークを削除します
+    def unlike(self, post_id: int) -> Response:
+        """いいねを解除する
 
+        Args:
+            post_id (int):
+
+        Returns:
+            Response:
         """
-        return self.PostAPI.remove_bookmark(user_id, post_id)
+        return asyncio.run(self.post.unlike(post_id))
 
-    def remove_group_highlight_post(self, group_id: int, post_id: int) -> dict:
+    def update_post(self, **params) -> Post:
+        """投稿を編集する
+
+        Args:
+            post_id (int):
+            text (str, optional):
+            font_size (int, optional):
+            color (int, optional):
+            message_tags (List, optional):
+
+        Returns:
+            Post:
         """
+        return asyncio.run(self.post.update_post(**params))
 
-        サークルのハイライト投稿を解除します
+    def view_video(self, video_id: int) -> Response:
+        """動画を視聴する
 
+        Args:
+            video_id (int):
+
+        Returns:
+            Response:
         """
-        return self.PostAPI.remove_group_highlight_post(group_id, post_id)
+        return asyncio.run(self.post.view_video(video_id))
 
-    def remove_posts(self, post_ids: list[int]) -> dict:
+    def vote_survey(self, survey_id: int, choice_id: int) -> VoteSurveyResponse:
+        """アンケートに投票する
+
+        Args:
+            survey_id (int):
+            choice_id (int):
+
+        Returns:
+            VoteSurveyResponse:
         """
+        return asyncio.run(self.post.vote_survey(survey_id, choice_id))
 
-        複数の投稿を削除します
+    # ---------- review api ----------
 
+    def create_review(self, user_id: int, comment: str) -> Response:
+        """レターを送信する
+
+        Args:
+            user_id (int):
+            comment (str):
+
+        Returns:
+            Response:
         """
-        return self.PostAPI.remove_posts(post_ids)
+        return asyncio.run(self.review.create_review(user_id, comment))
 
-    def report_post(
-        self,
-        post_id: int,
-        opponent_id: int,
-        category_id: int,
-        reason: Optional[str] = None,
-        screenshot_filename: Optional[str] = None,
-        screenshot_2_filename: Optional[str] = None,
-        screenshot_3_filename: Optional[str] = None,
-        screenshot_4_filename: Optional[str] = None,
-    ) -> dict:
+    def delete_reviews(self, review_ids: List[int]) -> Response:
+        """レターを削除する
+
+        Args:
+            review_ids (List[int]):
+
+        Returns:
+            Response:
         """
-
-        投稿を通報します
-
-        """
-        return self.PostAPI.report_post(
-            post_id,
-            opponent_id,
-            category_id,
-            reason,
-            screenshot_filename,
-            screenshot_2_filename,
-            screenshot_3_filename,
-            screenshot_4_filename,
-        )
-
-    def unlike(self, post_id: int) -> dict:
-        """
-
-        投稿のいいねを解除します
-
-        """
-        return self.PostAPI.unlike_post(post_id)
-
-    def update_post(
-        self,
-        post_id: int,
-        text: Optional[str] = None,
-        font_size: Optional[int] = None,
-        color: Optional[int] = None,
-        message_tags: Optional[list] = [],
-    ) -> Post:
-        """
-
-        投稿を編集します
-
-        """
-        return self.PostAPI.update_post(post_id, text, font_size, color, message_tags)
-
-    def view_video(self, video_id: int) -> dict:
-        """
-
-        動画を視聴します
-
-        """
-        return self.PostAPI.view_video(video_id)
-
-    def vote_survey(self, survey_id: int, choice_id: int) -> Survey:
-        """
-
-        アンケートに投票します
-
-        """
-        return self.PostAPI.vote_survey(survey_id, choice_id).survey
-
-    # -REVIEW
-
-    def create_review(self, user_id: int, comment: str) -> dict:
-        """
-
-        レターを送信します
-
-        """
-        return self.ReviewAPI.create_review(user_id, comment)
-
-    def create_reviews(self, user_ids: list[int], comment: str) -> dict:
-        """
-
-        複数人にレターを送信します
-
-        """
-        return self.ReviewAPI.create_reviews(user_ids, comment)
-
-    def delete_reviews(self, review_ids: list[int]) -> dict:
-        """
-
-        レターを削除します
-
-        """
-        return self.ReviewAPI.delete_reviews(review_ids)
+        return asyncio.run(self.review.delete_reviews(review_ids))
 
     def get_my_reviews(self, **params) -> ReviewsResponse:
+        """送信したレターを取得する
+
+        Args:
+            from_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            ReviewsResponse:
         """
-
-        送信したレターを取得します
-
-        Parameters
-        ----------
-
-            - from_id: int (optional)
-            - number: int = (optional)
-
-        """
-        return self.ReviewAPI.get_my_reviews(**params)
+        return asyncio.run(self.review.get_my_reviews(**params))
 
     def get_reviews(self, user_id: int, **params) -> ReviewsResponse:
+        """ユーザーが受け取ったレターを取得する
+
+        Args:
+            user_id (int):
+            from_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            ReviewsResponse:
         """
+        return asyncio.run(self.review.get_reviews(user_id, **params))
 
-        ユーザーが受け取ったレターを取得します
+    def pin_review(self, review_id: int) -> Response:
+        """レターをピン留めする
 
-        Parameters
-        ----------
+        Args:
+            review_id (int):
 
-            - user_id: int (required)
-            - from_id: int = (optional)
-            - number: int = (optional)
-
+        Returns:
+            Response:
         """
-        return self.ReviewAPI.get_reviews(user_id, **params)
+        return asyncio.run(self.review.pin_review(review_id))
 
-    def pin_review(self, review_id: int) -> dict:
+    def unpin_review(self, review_id: int) -> Response:
+        """レターのピン留めを解除する
+
+        Args:
+            review_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.review.unpin_review(review_id))
 
-        レターをピンします
-
-        """
-        return self.ReviewAPI.pin_review(review_id)
-
-    def unpin_review(self, review_id: int) -> dict:
-        """
-
-        レターのピン止めを解除します
-
-        """
-        return self.ReviewAPI.unpin_review(review_id)
-
-    # -THREAD
+    # ---------- thread api ----------
 
     def add_post_to_thread(self, post_id: int, thread_id: int) -> ThreadInfo:
+        """投稿をスレッドに追加する
+
+        Args:
+            post_id (int):
+            thread_id (int):
+
+        Returns:
+            ThreadInfo:
         """
+        return asyncio.run(self.thread.add_post_to_thread(post_id, thread_id))
 
-        投稿をスレッドに追加します
+    def convert_post_to_thread(self, post_id: int, **params) -> ThreadInfo:
+        """投稿をスレッドに変換する
 
+        Args:
+            post_id (int):
+            title (str, optional):
+            thread_icon_filename (str, optional):
+
+        Returns:
+            ThreadInfo:
         """
-        return self.ThreadAPI.add_post_to_thread(post_id, thread_id)
-
-    def convert_post_to_thread(
-        self,
-        post_id: int,
-        title: Optional[str] = None,
-        thread_icon_filename: Optional[str] = None,
-    ) -> ThreadInfo:
-        """
-
-        投稿をスレッドに変換します
-
-        """
-        return self.ThreadAPI.convert_post_to_thread(
-            post_id, title, thread_icon_filename
-        )
+        return asyncio.run(self.thread.convert_post_to_thread(post_id, **params))
 
     def create_thread(
         self,
@@ -2803,604 +2539,582 @@ class Client(BaseClient):
         title: str,
         thread_icon_filename: str,
     ) -> ThreadInfo:
+        """スレッドを作成する
+
+        Args:
+            group_id (int):
+            title (str):
+            thread_icon_filename (str):
+
+        Returns:
+            ThreadInfo:
         """
+        return asyncio.run(
+            self.thread.create_thread(group_id, title, thread_icon_filename)
+        )
 
-        スレッドを作成します
+    def get_group_thread_list(self, **params) -> GroupThreadListResponse:
+        """サークルのスレッド一覧を取得する
 
+        Args:
+            group_id (int):
+            from_str (str, optional):
+            join_status (str, optional):
+
+        Returns:
+            GroupThreadListResponse:
         """
-        return self.ThreadAPI.create_thread(group_id, title, thread_icon_filename)
+        return asyncio.run(self.thread.get_group_thread_list(**params))
 
-    def get_group_thread_list(
-        self,
-        group_id: int,
-        from_str: Optional[str] = None,
-        **params,
-    ) -> GroupThreadListResponse:
+    def get_thread_joined_statuses(self, ids: List[int]) -> Response:
+        """スレッド参加ステータスを取得する
+
+        Args:
+            ids (List[int]):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.thread.get_thread_joined_statuses(ids))
 
-        グループのスレッド一覧を取得します
+    def get_thread_posts(self, thread_id: int, **params) -> PostsResponse:
+        """スレッド内のタイムラインを取得する
 
-        Parameters
-        ----------
+        Args:
+            thread_id (int):
+            from_str (str, optional):
+            number (str, optional):
 
-            - group_id: int
-            - from_str: str = None
-            - join_status: str = None
-
+        Returns:
+            PostsResponse:
         """
-        return self.ThreadAPI.get_group_thread_list(group_id, from_str, **params)
+        return asyncio.run(self.thread.get_thread_posts(thread_id, **params))
 
-    def get_thread_joined_statuses(self, ids: list[int]) -> dict:
+    def join_thread(self, thread_id: int, user_id: int) -> Response:
+        """スレッドに参加する
+
+        Args:
+            thread_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.thread.join_thread(thread_id, user_id))
 
-        スレッド参加ステータスを取得します
+    def leave_thread(self, thread_id: int, user_id: int) -> Response:
+        """スレッドから脱退する
 
+        Args:
+            thread_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ThreadAPI.get_thread_joined_statuses(ids)
+        return asyncio.run(self.thread.leave_thread(thread_id, user_id))
 
-    def get_thread_posts(
-        self,
-        thread_id: int,
-        from_str: Optional[str] = None,
-        **params,
-    ) -> PostsResponse:
+    def delete_thread(self, thread_id: int) -> Response:
+        """スレッドを削除する
+
+        Args:
+            thread_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.thread.delete_thread(thread_id))
 
-        スレッドの投稿を取得します
+    def update_thread(self, thread_id: int, **params) -> Response:
+        """スレッドをアップデートする
 
-        Parameters
-        ----------
+        Args:
+            thread_id (int):
+            title (str):
+            thread_icon_filename (str):
 
-            - post_type: str
-            - number: int = None
-            - from_str: str = None
-
+        Returns:
+            Response:
         """
-        return self.ThreadAPI.get_thread_posts(thread_id, from_str, **params)
+        return asyncio.run(self.thread.update_thread(thread_id, **params))
 
-    def join_thread(self, thread_id: int, user_id: int) -> dict:
+    # ---------- user api ----------
+
+    def delete_footprint(self, user_id: int, footprint_id: int) -> Response:
+        """足跡を削除する
+
+        Args:
+            user_id (int):
+            footprint_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.user.delete_footprint(user_id, footprint_id))
 
-        スレッドに参加します
+    def follow_user(self, user_id: int) -> Response:
+        """ユーザーをフォローする
 
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
         """
-        return self.ThreadAPI.join_thread(thread_id, user_id)
+        return asyncio.run(self.user.follow_user(user_id))
 
-    def leave_thread(self, thread_id: int, user_id: int) -> dict:
+    def follow_users(self, user_ids: List[int]) -> Response:
+        """複数のユーザーをフォローする
+
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            Response:
         """
-
-        スレッドから脱退します
-
-        """
-        return self.ThreadAPI.leave_thread(thread_id, user_id)
-
-    def remove_thread(self, thread_id: int) -> dict:
-        """
-
-        スレッドを削除します
-
-        """
-        return self.ThreadAPI.remove_thread(thread_id)
-
-    def update_thread(
-        self,
-        thread_id: int,
-        title: str,
-        thread_icon_filename: str,
-    ) -> dict:
-        """
-
-        スレッドを編集します
-
-        """
-        return self.ThreadAPI.update_thread(thread_id, title, thread_icon_filename)
-
-    # -USER
-
-    def delete_footprint(self, user_id: int, footprint_id: int) -> dict:
-        """
-
-        足跡を削除します
-
-        """
-        return self.UserAPI.delete_footprint(user_id, footprint_id)
-
-    def destroy_user(self) -> dict:
-        """
-
-        アカウントを削除します
-
-        """
-        answer = input("Are you sure you want to delete your account? Y/N")
-        if answer.lower() != "y":
-            return
-        return self.UserAPI.destroy_user()
-
-    def follow_user(self, user_id: int) -> dict:
-        """
-
-        ユーザーをフォローします
-
-        """
-        return self.UserAPI.follow_user(user_id)
-
-    def follow_users(self, user_ids: list[int]) -> dict:
-        """
-
-        複数のユーザーをフォローします
-
-        """
-        return self.UserAPI.follow_users(user_ids)
+        return asyncio.run(self.user.follow_users(user_ids))
 
     def get_active_followings(self, **params) -> ActiveFollowingsResponse:
+        """アクティブなフォロー中のユーザーを取得する
+
+        Args:
+            only_online (bool, optional):
+            from_loggedin_at (int, optional):
+
+        Returns:
+            ActiveFollowingsResponse:
         """
-
-        アクティブなフォロー中のユーザーを取得します
-
-        Parameters
-        ----------
-
-            - only_online: bool
-            - from_loggedin_at: int = None
-
-        """
-        return self.UserAPI.get_active_followings(**params)
+        return asyncio.run(self.user.get_active_followings(**params))
 
     def get_follow_recommendations(self, **params) -> FollowRecommendationsResponse:
+        """フォローするのにおすすめのユーザーを取得する
+
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional):
+            sources (List[str], optional):
+
+        Returns:
+            FollowRecommendationsResponse:
         """
+        return asyncio.run(self.user.get_follow_recommendations(**params))
 
-        フォローするのにおすすめのユーザーを取得します
+    def get_follow_request(self, **params) -> UsersByTimestampResponse:
+        """フォローリクエストを取得する
 
-        Parameters
-        ----------
+        Args:
+            from_timestamp (int, optional):
 
-            - from_timestamp: int = None,
-            - number: int = None,
-            - sources: list[str] = None
-
+        Returns:
+            UsersByTimestampResponse:
         """
-        return self.UserAPI.get_follow_recommendations(**params)
+        return asyncio.run(self.user.get_follow_request(**params))
 
-    def get_follow_request(
-        self, from_timestamp: Optional[int] = None
-    ) -> UsersByTimestampResponse:
+    def get_follow_request_count(self) -> FollowRequestCountResponse:
+        """フォローリクエストの数を取得する
+
+        Returns:
+            FollowRequestCountResponse:
         """
+        return asyncio.run(self.user.get_follow_request_count())
 
-        フォローリクエストを取得します
+    def get_following_users_born(self, **params) -> UsersResponse:
+        """フォロー中のユーザーの誕生日を取得する
 
+        Args:
+            birthdate (int, optional):
+
+        Returns:
+            UsersResponse:
         """
-        return self.UserAPI.get_follow_request(from_timestamp)
+        return asyncio.run(self.user.get_following_users_born(**params))
 
-    def get_follow_request_count(self) -> int:
+    def get_footprints(self, **params) -> FootprintsResponse:
+        """足跡を取得する
+
+        Args:
+            from_id (int, optional):
+            number (int, optional):
+            mode (str, optional):
+
+        Returns:
+            FootprintsResponse:
         """
-
-        フォローリクエストの数を取得します
-
-        """
-        return self.UserAPI.get_follow_request_count().users_count
-
-    def get_following_users_born(
-        self, birthdate: Optional[int] = None
-    ) -> UsersResponse:
-        """
-
-        フォロー中のユーザーの誕生日を取得します
-
-        """
-        return self.UserAPI.get_following_users_born(birthdate)
-
-    def get_footprints(self, **params) -> list[Footprint]:
-        """
-
-        足跡を取得します
-
-        Parameters
-        ----------
-
-            - from_id: int = None
-            - number: int = None
-            - mode: str = None
-
-        """
-        return self.UserAPI.get_footprints(**params).footprints
+        return asyncio.run(self.user.get_footprints(**params))
 
     def get_fresh_user(self, user_id: int) -> UserResponse:
+        """認証情報などを含んだユーザー情報を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
         """
+        return asyncio.run(self.user.get_fresh_user(user_id))
 
-        認証情報などを含んだユーザー情報を取得します
+    def get_hima_users(self, **params) -> HimaUsersResponse:
+        """暇なユーザーを取得する
 
+        Args:
+            from_hima_id (int, optional):
+            number (int, optional):
+
+        Returns:
+            HimaUsersResponse:
         """
-        return self.UserAPI.get_fresh_user(user_id)
-
-    def get_hima_users(self, **params) -> list[UserWrapper]:
-        """
-
-        暇なユーザーを取得します
-
-        Parameters
-        ----------
-
-            - from_hima_id: int = None
-            - number: int = None
-
-        """
-        return self.UserAPI.get_hima_users(**params).hima_users
+        return asyncio.run(self.user.get_hima_users(**params))
 
     def get_user_ranking(self, mode: str) -> RankingUsersResponse:
+        """ユーザーのフォロワーランキングを取得する
+
+        Examples:
+            >>> # ルーキーを取得する:
+            >>> api.get_user_ranking(mode="one_month")
+
+            >>> # ミドルを取得する:
+            >>> api.get_user_ranking(mode="six_months")
+
+            >>> # 殿堂入りを取得する:
+            >>> api.get_user_ranking(mode="all_time")
+
+        Args:
+            mode (str):
+
+        Returns:
+            RankingUsersResponse:
         """
+        return asyncio.run(self.user.get_user_ranking(mode))
 
-        ユーザーのフォロワーランキングを取得します
+    def get_profile_refresh_counter_requests(self) -> RefreshCounterRequestsResponse:
+        """投稿数やフォロワー数をリフレッシュするための残リクエスト数を取得する
 
-        Examples
-        --------
-
-        >>> ルーキーを取得する場合:
-
-        >>> api.get_user_ranking(mode="one_month")
-
-        ---
-
-        >>> ミドルを取得する場合:
-
-        >>> api.get_user_ranking(mode="six_months")
-
-        ---
-
-        >>> 殿堂入りを取得する場合:
-
-        >>> api.get_user_ranking(mode="all_time")
-
+        Returns:
+            RefreshCounterRequestsResponse:
         """
-        return self.UserAPI.get_user_ranking(mode)
-
-    def get_refresh_counter_requests(self) -> RefreshCounterRequestsResponse:
-        """
-
-        カウンター更新のリクエストを取得します
-
-        """
-        return self.UserAPI.get_refresh_counter_requests()
+        return asyncio.run(self.user.get_profile_refresh_counter_requests())
 
     def get_social_shared_users(self, **params) -> SocialShareUsersResponse:
+        """SNS共有をしたユーザーを取得する
+
+        Args:
+            sns_name (str):
+            number (int, optional):
+            from_id (int, optional):
+
+        Returns:
+            SocialShareUsersResponse:
         """
-
-        SNS共有をしたユーザーを取得します
-
-        Parameters
-        ----------
-
-            - sns_name: str - (Required)
-            - number: int - (Optional)
-            - from_id: int - (Optional)
-
-        """
-        return self.UserAPI.get_social_shared_users(**params)
+        return asyncio.run(self.user.get_social_shared_users(**params))
 
     def get_timestamp(self) -> UserTimestampResponse:
+        """タイムスタンプを取得する
+
+        Returns:
+            UserTimestampResponse:
         """
+        return asyncio.run(self.user.get_timestamp())
 
-        タイムスタンプを取得します
+    def get_user(self, user_id: int) -> UserResponse:
+        """ユーザーの情報を取得する
 
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
         """
-        return self.UserAPI.get_timestamp()
-
-    def get_user(self, user_id: int) -> User:
-        """
-
-        ユーザーの情報を取得します
-
-        """
-        return self.UserAPI.get_user(user_id).user
-
-    def get_user_email(self, user_id: int) -> str:
-        """
-
-        ユーザーのメールアドレスを取得します
-
-        """
-        return self.UserAPI.get_user_email(user_id).email
+        return asyncio.run(self.user.get_user(user_id))
 
     def get_user_followers(self, user_id: int, **params) -> FollowUsersResponse:
+        """ユーザーのフォロワーを取得する
+
+        Args:
+            user_id (int):
+            from_follow_id (int, optional):
+            followed_by_me: (int, optional):
+            number: (int, optional):
+
+        Returns:
+            FollowUsersResponse:
         """
-
-        ユーザーのフォロワーを取得します
-
-        Parameters
-        ----------
-
-            - user_id: int
-            - from_follow_id: int = None
-            - followed_by_me: int = None
-
-        """
-        return self.UserAPI.get_user_followers(user_id, **params)
+        return asyncio.run(self.user.get_user_followers(user_id, **params))
 
     def get_user_followings(self, user_id: int, **params) -> FollowUsersResponse:
+        """フォロー中のユーザーを取得する
+
+        Args:
+            user_id (int):
+            from_follow_id (int, optional):
+            from_timestamp (int, optional):
+            order_by (str, optional):
+            number (int, optional):
+
+        Returns:
+            FollowUsersResponse:
         """
-
-        フォロー中のユーザーを取得します
-
-        Parameters
-        ----------
-
-            - user_id: int
-            - from_follow_id: int = None
-            - from_timestamp: int = None
-            - order_by: str = None
-
-        """
-        return self.UserAPI.get_user_followings(user_id, **params)
+        return asyncio.run(self.user.get_user_followings(user_id, **params))
 
     def get_user_from_qr(self, qr: str) -> UserResponse:
-        """
+        """QRコードからユーザーを取得する
 
-        QRコードからユーザーを取得します
+        Args:
+            qr (str):
 
+        Returns:
+            UserResponse:
         """
-        return self.UserAPI.get_user_from_qr(qr)
+        return asyncio.run(self.user.get_user_from_qr(qr))
 
     def get_user_without_leaving_footprint(self, user_id: int) -> UserResponse:
+        """足跡をつけずにユーザーの情報を取得する
+
+        Args:
+            user_id (int):
+
+        Returns:
+            UserResponse:
         """
+        return asyncio.run(self.user.get_user_without_leaving_footprint(user_id))
 
-        足跡をつけずにユーザーの情報を取得します
+    def get_users(self, user_ids: List[int]) -> UsersResponse:
+        """複数のユーザーの情報を取得する
 
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            UsersResponse:
         """
-        return self.UserAPI.get_user_without_leaving_footprint(user_id)
+        return asyncio.run(self.user.get_users(user_ids))
 
-    def get_users(self, user_ids: list[int]) -> UsersResponse:
+    def refresh_profile_counter(self, counter: str) -> Response:
+        """プロフィールのカウンターを更新する
+
+        Args:
+            counter (str):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.user.refresh_profile_counter(counter))
 
-        複数のユーザーの情報を取得します
-
+    def register(self, **params) -> CreateUserResponse:
         """
-        return self.UserAPI.get_users(user_ids)
+        Args:
+            email (str):
+            email_grant_token (str):
+            password (str):
+            nickname (str):
+            birth_date (str):
+            gender (int, optional):
+            country_code (str, optional):
+            biography (str, optional):
+            prefecture (str, optional):
+            profile_icon_filename (str, optional):
+            cover_image_filename (str, optional):
+            en (int, optional):
+            vn (int, optional):
 
-    def refresh_counter(self, counter: str) -> dict:
+        Returns:
+            CreateUserResponse:
         """
+        return asyncio.run(self.user.register(**params))
 
-        カウンターを更新します
+    def delete_user_avatar(self) -> Response:
+        """ユーザーのアイコンを削除する
 
+        Returns:
+            Response:
         """
-        return self.UserAPI.refresh_counter(counter)
+        return asyncio.run(self.user.delete_user_avatar())
 
-    def register(
-        self,
-        email: str,
-        email_grant_token: str,
-        password: str,
-        nickname: str,
-        birth_date: str,
-        gender: Optional[int] = -1,
-        country_code: Optional[str] = "JP",
-        biography: Optional[str] = None,
-        prefecture: Optional[str] = None,
-        profile_icon_filename: Optional[str] = None,
-        cover_image_filename: Optional[str] = None,
-        en: Optional[int] = None,
-        vn: Optional[int] = None,
-    ):
+    def delete_user_cover(self) -> Response:
+        """ユーザーのカバー画像を削除する
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.user.delete_user_cover())
 
-        Register user
+    def reset_password(self, **params) -> Response:
+        """パスワードをリセットする
 
+        Args:
+            email (str):
+            email_grant_token (str):
+            password (str):
+
+        Returns:
+            Response:
         """
-        return self.UserAPI.register(
-            email,
-            email_grant_token,
-            password,
-            nickname,
-            birth_date,
-            gender,
-            country_code,
-            biography,
-            prefecture,
-            profile_icon_filename,
-            cover_image_filename,
-            en,
-            vn,
-        )
-
-    def remove_user_avatar(self) -> dict:
-        """
-
-        ユーザーのアイコンを削除します
-
-        """
-        return self.UserAPI.remove_user_avatar()
-
-    def remove_user_cover(self) -> dict:
-        """
-
-        ユーザーのカバー画像を削除します
-
-        """
-        return self.UserAPI.remove_user_cover()
-
-    def report_user(
-        self,
-        user_id: int,
-        category_id: int,
-        reason: Optional[str] = None,
-        screenshot_filename: Optional[str] = None,
-        screenshot_2_filename: Optional[str] = None,
-        screenshot_3_filename: Optional[str] = None,
-        screenshot_4_filename: Optional[str] = None,
-    ) -> dict:
-        """
-
-        ユーザーを通報します
-
-        """
-        return self.UserAPI.report_user(
-            user_id,
-            category_id,
-            reason,
-            screenshot_filename,
-            screenshot_2_filename,
-            screenshot_3_filename,
-            screenshot_4_filename,
-        )
-
-    def reset_password(
-        self,
-        email: str,
-        email_grant_token: str,
-        password: str,
-    ) -> dict:
-        """
-
-        パスワードをリセットします
-
-        """
-        return self.UserAPI.reset_password(email, email_grant_token, password)
+        return asyncio.run(self.user.reset_password(**params))
 
     def search_lobi_users(self, **params) -> UsersResponse:
+        """Lobiのユーザーを検索する
+
+        Args:
+            nickname (str, optional):
+            number (int, optional):
+            from_str (str, optional):
+
+        Returns:
+            UsersResponse:
         """
-
-        Lobiのユーザーを検索します
-
-        Parameters
-        ----------
-
-            - nickname: str = None
-            - number: int = None
-            - from_str: str = None
-
-        """
-        return self.UserAPI.search_lobi_users(**params)
+        return asyncio.run(self.user.search_lobi_users(**params))
 
     def search_users(self, **params) -> UsersResponse:
+        """ユーザーを検索する
+
+        Args:
+            gender (int, optional):
+            nickname (str, optional):
+            title (str, optional):
+            biography (str, optional):
+            from_timestamp (int, optional):
+            similar_age (bool, optional):
+            not_recent_gomimushi (bool, optional):
+            recently_created (bool, optional):
+            same_prefecture (bool, optional):
+            save_recent_search (bool, optional):
+
+        Returns:
+            UsersResponse:
         """
+        return asyncio.run(self.user.search_users(**params))
 
-        ユーザーを検索します
+    def set_follow_permission_enabled(self, **params) -> Response:
+        """フォローを許可制にするかを設定する
 
-        Parameters
-        ----------
+        Args:
+            nickname (str):
+            is_private (bool, optional):
 
-            - gender: int = None
-            - nickname: str = None
-            - title: str = None
-            - biography: str = None
-            - from_timestamp: int = None
-            - similar_age: bool = None
-            - not_recent_gomimushi: bool = None
-            - recently_created: bool = None
-            - same_prefecture: bool = None
-            - save_recent_search: bool = None
-
+        Returns:
+            Response:
         """
-        return self.UserAPI.search_users(**params)
+        return asyncio.run(self.user.set_follow_permission_enabled(**params))
 
-    def set_follow_permission_enabled(
-        self,
-        nickname: str,
-        is_private: Optional[bool] = None,
-    ) -> dict:
+    def take_action_follow_request(self, user_id: int, action: str) -> Response:
+        """フォローリクエストを操作する
+
+        Args:
+            user_id (int):
+            action (str):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.user.take_action_follow_request(user_id, action))
 
-        フォローを許可制に設定します
+    def turn_on_hima(self) -> Response:
+        """ひまなうを有効にする
 
+        Returns:
+            Response:
         """
-        return self.UserAPI.set_follow_permission_enabled(nickname, is_private)
+        return asyncio.run(self.user.turn_on_hima())
 
-    def take_action_follow_request(self, target_id: int, action: str) -> dict:
-        return self.UserAPI.take_action_follow_request(target_id, action)
+    def unfollow_user(self, user_id: int) -> Response:
+        """ユーザーをアンフォローする
 
-    def turn_on_hima(self) -> dict:
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
         """
+        return asyncio.run(self.user.unfollow_user(user_id))
 
-        ひまなう
+    def update_user(self, nickname: str, **params) -> Response:
+        """プロフィールを更新する
 
+        Args:
+            nickname (str):
+            biography (str, optional):
+            prefecture (str, optional):
+            gender (int, optional):
+            country_code (str, optional):
+            profile_icon_filename (str, optional):
+            cover_image_filename (str, optional):
+            username (str, optional):
+
+        Returns:
+            Response:
         """
-        return self.UserAPI.turn_on_hima()
+        return asyncio.run(self.user.update_user(nickname, **params))
 
-    def unfollow_user(self, user_id: int) -> dict:
+    def block_user(self, user_id: int) -> Response:
+        """ユーザーをブロックする
+
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
         """
-
-        ユーザーをアンフォローします
-
-        """
-        return self.UserAPI.unfollow_user(user_id)
-
-    def update_user(self, nickname: str, **params) -> dict:
-        """
-
-        プロフィールを更新します
-
-        Parameters
-        ----------
-
-            - nickname: str = (required)
-            - biography: str = (optional)
-            - prefecture: str = (optional)
-            - gender: int = (optional)
-            - country_code: str = (optional)
-            - profile_icon_filename: str = (optional)
-            - cover_image_filename: str = (optional)
-            - username: str = (optional)
-            - : str = (optional)
-
-        """
-        return self.UserAPI.update_user(nickname, **params)
-
-    def block_user(self, user_id: int) -> dict:
-        """
-
-        ユーザーをブロックします
-
-        """
-        return self.UserAPI.block_user(user_id)
+        return asyncio.run(self.user.block_user(user_id))
 
     def get_blocked_user_ids(self) -> BlockedUserIdsResponse:
+        """あなたをブロックしたユーザーを取得する
+
+        Returns:
+            BlockedUserIdsResponse:
         """
+        return asyncio.run(self.user.get_blocked_user_ids())
 
-        あなたをブロックしたユーザーを取得します
+    def get_blocked_users(self, **params) -> BlockedUsersResponse:
+        """ブロックしたユーザーを取得する
 
+        Args:
+            from_id (int, optional):
+
+        Returns:
+            BlockedUsersResponse:
         """
-        return self.UserAPI.get_blocked_user_ids()
+        return asyncio.run(self.user.get_blocked_users(**params))
 
-    def get_blocked_users(self, from_id: Optional[int] = None) -> BlockedUsersResponse:
+    def unblock_user(self, user_id: int) -> Response:
+        """ユーザーをアンブロックする
+
+        Args:
+            user_id (int):
+
+        Returns:
+            Response:
         """
-
-        ブロックしたユーザーを取得します
-
-        """
-        return self.UserAPI.get_blocked_users(from_id)
-
-    def unblock_user(self, user_id: int) -> dict:
-        """
-
-        ユーザーをアンブロックします
-
-        """
-        return self.UserAPI.unblock_user(user_id)
+        return asyncio.run(self.user.unblock_user(user_id))
 
     def get_hidden_users_list(self, **params) -> HiddenResponse:
+        """非表示のユーザー一覧を取得する
+
+        Args:
+            from_str (str, optional):
+            number (int, optional):
+
+        Returns:
+            HiddenResponse:
         """
+        return asyncio.run(self.user.get_hidden_users_list(**params))
 
-        非表示のユーザー一覧を取得します
+    def hide_user(self, user_id: int) -> Response:
+        """ユーザーを非表示にする
 
-        Parameters
-        ----------
+        Args:
+            user_id (int):
 
-            - from: str = None
-            - number: int = None
-
+        Returns:
+            Response:
         """
-        return self.UserAPI.get_hidden_users_list(**params)
+        return asyncio.run(self.user.hide_user(user_id))
 
-    def hide_user(self, user_id: int) -> dict:
+    def unhide_users(self, user_ids: List[int]) -> Response:
+        """ユーザーの非表示を解除する
+
+        Args:
+            user_ids (List[int]):
+
+        Returns:
+            Response:
         """
-
-        ユーザーを非表示にします
-
-        """
-        return self.UserAPI.hide_user(user_id)
-
-    def unhide_users(self, user_ids: list[int]) -> dict:
-        """
-
-        ユーザーの非表示を解除します
-
-        """
-        return self.UserAPI.unhide_users(user_ids)
+        return asyncio.run(self.user.unhide_users(user_ids))

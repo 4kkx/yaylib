@@ -6,8 +6,9 @@
       "source.organizeImports": "explicit"
     }
   },
-  "python.formatting.provider": "black",
-  "python.formatting.blackArgs": ["--line-length=88"],
-  "python.linting.enabled": true,
-  "editor.formatOnSave": true
+  "autoDocstring.docstringFormat": "google",
+  "pylint.ignorePatterns": ["**/tests/*.py", "**/docs/*.py"],
+  "pylint.args": ["--rcfile=.pylintrc"],
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode"
 }

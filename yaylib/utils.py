@@ -23,35 +23,42 @@ SOFTWARE.
 """
 
 import base64
-import hmac
 import hashlib
-import jwt
+import hmac
+import logging
 import re
 import uuid
-
+from base64 import urlsafe_b64encode
 from datetime import datetime
-from typing import Any
+from json import dumps
+from typing import Any, Optional
 
-from .config import Configs
-
-
-class Colors:
-    HEADER = "\033[95m"
-    OKBLUE = "\033[94m"
-    OKCYAN = "\033[96m"
-    OKGREEN = "\033[92m"
-    WARNING = "\033[93m"
-    FAIL = "\033[91m"
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    UNDERLINE = "\033[4m"
+from . import config
+from .constants import Color
+from .models import Attachment
 
 
-def console_print(*args):
-    print("\n")
-    for arg in args:
-        print(arg)
-    print("\n")
+class CustomFormatter(logging.Formatter):
+    """ログ用意のフォーマッター"""
+
+    @staticmethod
+    def __get_formats() -> dict:
+        date = Color.HEADER + "%(asctime)s " + Color.RESET
+        level = Color.UNDERLINE + "%(levelname)s" + Color.RESET
+        body = " » %(message)s"
+
+        return {
+            logging.DEBUG: date + Color.OKGREEN + level + Color.RESET + body,
+            logging.INFO: date + Color.OKBLUE + level + Color.RESET + body,
+            logging.WARNING: date + Color.WARNING + level + Color.RESET + body,
+            logging.ERROR: date + Color.FAIL + level + Color.RESET + body,
+            logging.CRITICAL: date + Color.FAIL + level + Color.RESET + body,
+        }
+
+    def format(self, record):
+        fmt = self.__get_formats().get(record.levelno)
+        formatter = logging.Formatter(fmt)
+        return formatter.format(record)
 
 
 def mention(user_id: int, display_name: str) -> str:
@@ -113,6 +120,16 @@ def get_post_type(**kwargs) -> str:
         return "text"
 
 
+def filter_dict(params: Optional[dict] = None) -> Optional[dict]:
+    if params is None:
+        return None
+    new_params = {}
+    for k in params:
+        if params[k] is not None:
+            new_params[k] = params[k]
+    return new_params
+
+
 def generate_uuid(uuid_type=True):
     generated_uuid = str(uuid.uuid4())
     if uuid_type:
@@ -123,47 +140,70 @@ def generate_uuid(uuid_type=True):
 
 def generate_jwt() -> str:
     timestamp = int(datetime.now().timestamp())
-    return jwt.encode(
-        payload={"exp": timestamp + 5, "iat": timestamp},
-        key=Configs.API_VERSION_KEY.encode("utf-8"),
+    encoded_headers = (
+        urlsafe_b64encode(dumps({"alg": "HS256"}, separators=(",", ":")).encode())
+        .decode()
+        .strip("=")
     )
+    encoded_payload = (
+        urlsafe_b64encode(
+            dumps(
+                {"iat": timestamp, "exp": timestamp + 5}, separators=(",", ":")
+            ).encode()
+        )
+        .decode()
+        .strip("=")
+    )
+    payload = encoded_headers + "." + encoded_payload
+    sig = (
+        urlsafe_b64encode(
+            hmac.new(
+                key=config.API_VERSION_KEY.encode(),
+                msg=payload.encode(),
+                digestmod=hashlib.sha256,
+            ).digest()
+        )
+        .decode()
+        .strip("=")
+    )
+    return payload + "." + sig
 
 
-def is_valid_image_format(format):
+def is_valid_image_format(image_format: str):
     allowed_formats = [".jpg", ".jpeg", ".png", ".gif"]
-    return format in allowed_formats
+    return image_format in allowed_formats
 
 
-def is_valid_video_format(format):
+def is_valid_video_format(video_format: str):
     allowed_formats = [".mp4"]
-    return format in allowed_formats
+    return video_format in allowed_formats
 
 
-def get_hashed_filename(att, type, key, uuid):
+def get_hashed_filename(att: Attachment, file_type: str, key: int, uuid_str: str):
     today = datetime.now()
     full_date = today.strftime("%Y/%m/%d")
     thumbnail = "thumb_" if att.is_thumb else ""
-    file_name = f"{thumbnail}{uuid}_{int(today.timestamp())}_{key}"
+    file_name = f"{thumbnail}{uuid_str}_{int(today.timestamp())}_{key}"
     sizes = f"_size_{att.natural_width}x{att.natural_height}"
     extension = f"{att.original_file_extension}"
 
-    hashed_filename = f"{type}/{full_date}/{file_name}{sizes}{extension}"
+    hashed_filename = f"{file_type}/{full_date}/{file_name}{sizes}{extension}"
 
     return hashed_filename
 
 
-def md5(uuid: str, timestamp: int, require_shared_key: bool) -> str:
-    shared_key: str = Configs.SHARED_KEY if require_shared_key else ""
+def md5(device_uuid: str, timestamp: int, require_shared_key: bool) -> str:
+    shared_key: str = config.SHARED_KEY if require_shared_key else ""
     return hashlib.md5(
-        (Configs.API_KEY + uuid + str(timestamp) + shared_key).encode()
+        (config.API_KEY + device_uuid + str(timestamp) + shared_key).encode()
     ).hexdigest()
 
 
 def sha256() -> str:
     return base64.b64encode(
         hmac.new(
-            Configs.API_VERSION_KEY.encode(),
-            "yay_android/{}".format(Configs.API_VERSION_NAME).encode(),
+            config.API_VERSION_KEY.encode(),
+            "yay_android/{}".format(config.API_VERSION_NAME).encode(),
             hashlib.sha256,
         ).digest()
     ).decode("utf-8")

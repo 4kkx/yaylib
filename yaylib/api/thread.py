@@ -22,123 +22,197 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
+from typing import List
 
-from .. import client
+from .. import config
 from ..models import ThreadInfo
-from ..responses import GroupThreadListResponse, PostsResponse
+from ..responses import GroupThreadListResponse, PostsResponse, Response
 
 
-class ThreadAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+class ThreadApi:
+    """スレッド API"""
 
-    def add_post_to_thread(self, post_id: int, thread_id: int) -> ThreadInfo:
-        return self.__base._request(
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
+
+        self.__client: Client = client
+
+    async def add_post_to_thread(self, post_id: int, thread_id: int) -> ThreadInfo:
+        """投稿をスレッドに追加する
+
+        Args:
+            post_id (int):
+            thread_id (int):
+
+        Returns:
+            ThreadInfo:
+        """
+        return await self.__client.request(
             "PUT",
-            route=f"/v3/posts/{post_id}/move_to_thread/{thread_id}",
-            data_type=ThreadInfo,
+            config.API_HOST + f"/v3/posts/{post_id}/move_to_thread/{thread_id}",
+            return_type=ThreadInfo,
         )
 
-    def convert_post_to_thread(
-        self, post_id: int, title: str = None, thread_icon_filename: str = None
-    ) -> ThreadInfo:
-        return self.__base._request(
+    async def convert_post_to_thread(self, post_id: int, **params) -> ThreadInfo:
+        """投稿をスレッドに変換する
+
+        Args:
+            post_id (int):
+            title (str, optional):
+            thread_icon_filename (str, optional):
+
+        Returns:
+            ThreadInfo:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v3/posts/{post_id}/move_to_thread",
-            payload={"title": title, "thread_icon_filename": thread_icon_filename},
-            data_type=ThreadInfo,
+            config.API_HOST + f"/v3/posts/{post_id}/move_to_thread",
+            json=params,
+            return_type=ThreadInfo,
         )
 
-    def create_thread(
+    async def create_thread(
         self, group_id: int, title: str, thread_icon_filename: str
     ) -> ThreadInfo:
-        return self.__base._request(
+        """スレッドを作成する
+
+        Args:
+            group_id (int):
+            title (str):
+            thread_icon_filename (str):
+
+        Returns:
+            ThreadInfo:
+        """
+        return await self.__client.request(
             "POST",
-            route=f"/v1/threads/",
-            payload={
+            config.API_HOST + "/v1/threads/",
+            json={
                 "group_id": group_id,
                 "title": title,
                 "thread_icon_filename": thread_icon_filename,
             },
-            data_type=ThreadInfo,
+            return_type=ThreadInfo,
         )
 
-    def get_group_thread_list(
-        self, group_id: int, from_str: str = None, **params
-    ) -> GroupThreadListResponse:
+    async def get_group_thread_list(self, **params) -> GroupThreadListResponse:
+        """サークルのスレッド一覧を取得する
+
+        Args:
+            group_id (int):
+            from_str (str, optional):
+            join_status (str, optional):
+
+        Returns:
+            GroupThreadListResponse:
         """
-
-        Parameters:
-        -----------
-
-            - group_id: int
-            - from_str: str = None
-            - join_status: str = None
-
-        """
-        params["group_id"] = group_id
-        if from_str:
-            params["from"] = from_str
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            route=f"/v1/threads/",
+            config.API_HOST + "/v1/threads/",
             params=params,
-            data_type=GroupThreadListResponse,
+            return_type=GroupThreadListResponse,
         )
 
-    def get_thread_joined_statuses(self, ids: list[int]) -> dict:
-        return self.__base._request(
+    async def get_thread_joined_statuses(self, ids: List[int]) -> Response:
+        """スレッド参加ステータスを取得する
+
+        Args:
+            ids (List[int]):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "GET",
-            route=f"/v1/threads/joined_statuses",
+            config.API_HOST + "/v1/threads/joined_statuses",
             params={"ids[]": ids},
+            return_type=Response,
         )
 
-    def get_thread_posts(
-        self, thread_id: int, from_str: str = None, **params
-    ) -> PostsResponse:
+    async def get_thread_posts(self, thread_id: int, **params) -> PostsResponse:
+        """スレッド内のタイムラインを取得する
+
+        Args:
+            thread_id (int):
+            from_str (str, optional):
+            number (str, optional):
+
+        Returns:
+            PostsResponse:
         """
-
-        Parameters:
-        -----------
-
-            - post_type: str
-            - number: int = None
-            - from_str: str = None
-
-        """
-        if from_str:
-            params["from"] = from_str
-        return self.__base._request(
+        params["from"] = params.get("from_str")
+        return await self.__client.request(
             "GET",
-            route=f"/v1/threads/{thread_id}/posts",
+            config.API_HOST + f"/v1/threads/{thread_id}/posts",
             params=params,
-            data_type=PostsResponse,
+            return_type=PostsResponse,
         )
 
-    def join_thread(self, thread_id: int, user_id: int):
-        return self.__base._request(
-            "POST", route=f"/v1/threads/{thread_id}/members/{user_id}"
+    async def join_thread(self, thread_id: int, user_id: int) -> Response:
+        """スレッドに参加する
+
+        Args:
+            thread_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
+            "POST",
+            config.API_HOST + f"/v1/threads/{thread_id}/members/{user_id}",
+            return_type=Response,
         )
 
-    def leave_thread(self, thread_id: int, user_id: int):
-        return self.__base._request(
+    async def leave_thread(self, thread_id: int, user_id: int) -> Response:
+        """スレッドから脱退する
+
+        Args:
+            thread_id (int):
+            user_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/threads/{thread_id}/members/{user_id}",
+            config.API_HOST + f"/v1/threads/{thread_id}/members/{user_id}",
+            return_type=Response,
         )
 
-    def remove_thread(
+    async def delete_thread(
         self,
         thread_id: int,
-    ):
-        return self.__base._request(
+    ) -> Response:
+        """スレッドを削除する
+
+        Args:
+            thread_id (int):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "DELETE",
-            route=f"/v1/threads/{thread_id}",
+            config.API_HOST + f"/v1/threads/{thread_id}",
+            return_type=Response,
         )
 
-    def update_thread(self, thread_id: int, title: str, thread_icon_filename: str):
-        return self.__base._request(
+    async def update_thread(self, thread_id: int, **params) -> Response:
+        """スレッドをアップデートする
+
+        Args:
+            thread_id (int):
+            title (str):
+            thread_icon_filename (str):
+
+        Returns:
+            Response:
+        """
+        return await self.__client.request(
             "PUT",
-            route=f"/v1/threads/{thread_id}",
-            payload={"title": title, "thread_icon_filename": thread_icon_filename},
+            config.API_HOST + f"/v1/threads/{thread_id}",
+            json=params,
+            return_type=Response,
         )

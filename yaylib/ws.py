@@ -22,22 +22,13 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
+import asyncio
+from typing import Optional
 
-import json
-import websocket
+import aiohttp
 
-from typing import Optional, Dict, Type, Any
-
-from . import client
-from .config import Configs
-from .models import Message
-
-
-__all__ = (
-    "Intents",
-    "WebSocketInteractor",
-)
+from . import config
+from .models import Message, WSChannelMessage, WSMessage
 
 
 class Intents:
@@ -46,180 +37,208 @@ class Intents:
         self.group_update: bool = False
 
     @classmethod
-    def all(cls: Type[Intents]) -> Intents:
+    def all(cls):
         self = cls()
         for attr in vars(self):
             setattr(self, attr, True)
         return self
 
     @classmethod
-    def none(cls: Type[Intents]) -> Intents:
+    def none(cls):
         return cls()
 
 
-class Identifier(object):
-    __slots__ = "channel"
+class WSEventListener:
+    async def on_ready(self):
+        pass
 
-    def __init__(self, data) -> None:
-        self.channel: Optional[str] = data.get("channel")
+    # ---------- ChatRoomChannel ----------
 
+    async def on_message(self, message: Message):
+        pass
 
-class Content(object):
-    __slots__ = ("event", "message", "data")
+    async def on_chat_delete(self, room_id: int):
+        pass
 
-    def __init__(self, data) -> None:
-        self.event: Optional[str] = data.get("event")
-        self.message: Optional[Dict[str, Any]] = data.get("message")
-        self.data: Optional[Dict[str, Any]] = data.get("data")
+    async def on_chat_request(self, total_requests: int):
+        pass
 
+    # ---------- GroupUpdatesChannel ----------
 
-class ChannelMessage(object):
-    __slots__ = ("type", "message", "identifier", "sid")
-
-    def __init__(self, data) -> None:
-        self.type: Optional[str] = data.get("type")
-
-        self.message: Optional[Content] = data.get("message")
-        if self.message is not None and isinstance(self.message, dict):
-            self.message = Content(self.message)
-
-        self.identifier: Optional[Identifier] = data.get("identifier")
-        if self.identifier is not None:
-            self.identifier = Identifier(json.loads(self.identifier))
-
-        self.sid: Optional[str] = data.get("sid")
+    async def on_group_update(self, group_id: int):
+        pass
 
 
-class WebSocketInteractor(object):
-    intent_map: Dict[str, str] = {
+class WebSocketInteractor(WSEventListener):
+    INTENT_MAP = {
         "chat_message": "ChatRoomChannel",
         "group_update": "GroupUpdatesChannel",
     }
 
-    def __init__(
-        self,
-        base: client.BaseClient,
-        intents: Intents,
-    ) -> None:
-        self.__intents: Intents = intents
-        self.__base: client.BaseClient = base
+    def __init__(self, client, intents: Intents):
+        # pylint: disable=import-outside-toplevel
+        from .client import Client
+
+        self.__client: Client = client
+        self.__intents = intents
+        self.__session: Optional[aiohttp.ClientSession] = None
+        self.__ws: Optional[aiohttp.ClientWebSocketResponse] = None
         self.__ws_token: Optional[str] = None
-        self.__ws: Optional[websocket.WebSocketApp] = None
 
-    def set_ws_token(self, ws_token: str) -> None:
-        self.__ws_token = ws_token
+    def set_ws_token(self, token: str):
+        self.__ws_token = token
 
-    def __on_open(self, ws):
-        self.__base.logger.debug("on_open")
-
-    def __on_message(self, ws, message: str):
-        self.__base.logger.debug(f"on_message: {message}")
-
-        events = ChannelMessage(json.loads(message))
-
-        if events.type == "ping":
-            return  # ignore ping events
-
-        if events.type == "welcome":
-            self.__connect()
-            self.on_ready()
-            return
-
-        if events.type == "confirm_subscription" and events.identifier:
-            self.__base.logger.debug(
-                f"Connected to Gateway -> {events.identifier.channel}"
-            )
-            return
-
-        content = events.message
-
-        if content and events.identifier and content.event:
-            if events.identifier.channel == "ChatRoomChannel":
-                if content.event == "new_message":
-                    if content.message is not None:
-                        self.on_message(Message(content.message))
-
-                elif content.event == "chat_deleted":
-                    self.on_chat_room_delete(content.data.get("room_id"))
-
-                elif content.event == "total_chat_request":
-                    self.on_chat_request(content.data.get("total_count"))
-
-            elif events.identifier.channel == "GroupUpdatesChannel":
-                if content.event == "new_post":
-                    self.on_group_update(content.data.get("group_id"))
-
-    def on_chat_message(self, message: Message):
-        """チャットメッセージが届いた時に発火される関数"""
-        pass
-
-    def on_chat_room_delete(self, room_id: int | None):
-        """チャットルームが削除された時に発火される関数"""
-        pass
-
-    def on_chat_request(self, total_count: int | None):
-        """チャットリクエストが届いた時に発火される関数"""
-        pass
-
-    def on_group_update(self, group_id: int | None):
-        """サークルに投稿された時に発火される関数"""
-        pass
-
-    def __on_error(self, ws, error):
-        self.__base.logger.error(error)
-
-    def __on_close(self, ws, close_status_code, close_msg):
-        pass
-
-    def __send_channel_command(self, command: str, channel: str) -> None:
+    async def __send_channel_command(self, command: str, channel: str) -> None:
         if self.__ws is not None:
-            self.__ws.send(
-                json.dumps(
-                    {
-                        "command": command,
-                        "identifier": f'{{"channel":"{channel}"}}',
-                    }
-                )
+            await self.__ws.send_json(
+                {
+                    "command": command,
+                    "identifier": f'{{"channel":"{channel}"}}',
+                }
             )
 
-    def __subscribe(self, channel: str) -> None:
-        self.__send_channel_command("subscribe", channel)
+    # ---------- event handlers ----------
 
-    def __unsubscribe(self, channel: str) -> None:
-        self.__send_channel_command("unsubscribe", channel)
+    async def __on_ping_event(self, channel_msg: WSChannelMessage):
+        pass  # ignore ping messages
 
-    def __connect(self) -> None:
-        # Connect to channels based on intents
+    # pylint: disable=unused-argument
+    async def __on_welcome_event(self, channel_msg: WSChannelMessage):
         intents_vars = vars(self.__intents)
         channels: list[str] = [
             channel for channel, value in intents_vars.items() if value
         ]
         for channel in channels:
-            channel = self.intent_map.get(channel)
+            channel = self.INTENT_MAP.get(channel)
             if channel is not None:
-                self.__subscribe(channel)
+                await self.__send_channel_command("subscribe", channel)
 
-    def on_ready(self) -> None:
-        """クライアントの準備が完了すると呼び出されます"""
-        self.__base.logger.debug("on_ready")
+        await self.on_ready()
 
-    def run(self, email: str = None, password: str = None) -> None:
-        """クライアントを起動します"""
-        if email is not None and password is not None:
-            self.__base._prepare(email, password)
+    async def __on_confirm_subscription_event(self, channel_msg: WSChannelMessage):
+        if channel_msg.identifier:
+            self.__client.logger.info(
+                f"Connected to Gateway -> {channel_msg.identifier.channel}"
+            )
+
+    async def __on_disconnect_event(self, channel_msg: WSChannelMessage):
+        self.__client.logger.error(
+            f"WebSocket disconnected! reason: {channel_msg.reason}"
+        )
+        await self.stop()
+
+    # ---------- channel handlers ----------
+
+    async def __on_chat_room_channel_event(self, ws_msg: WSMessage):
+        match ws_msg.event:
+            case "new_message":
+                if ws_msg.message is None:
+                    return
+                await self.on_message(Message(ws_msg.message))
+            case "chat_deleted":
+                await self.on_chat_delete(ws_msg.data.get("room_id"))
+            case "total_chat_request":
+                await self.on_chat_request(ws_msg.data.get("total_count"))
+            case _:
+                self.__client.logger.error(f"Unknown event: {ws_msg.event}")
+                return
+
+    async def __on_group_updates_channel_event(self, ws_msg: WSMessage):
+        match ws_msg.event:
+            case "new_post":
+                await self.on_group_update(ws_msg.data.get("group_id"))
+            case _:
+                self.__client.logger.error(f"Unknown event: {ws_msg.event}")
+                return
+
+    # ---------- low level events ----------
+
+    async def __on_open(self):
+        self.__client.logger.debug("ws: __on_open()")
+
+    async def __on_message(self, data: dict):
+        channel_msg = WSChannelMessage(data)
+        self.__client.logger.debug(f"ws: __on_message({channel_msg})")
+
+        event_handlers = {
+            "ping": self.__on_ping_event,
+            "welcome": self.__on_welcome_event,
+            "confirm_subscription": self.__on_confirm_subscription_event,
+            "disconnect": self.__on_disconnect_event,
+        }
+        event_handler = event_handlers.get(channel_msg.type)
+        if event_handler:
+            await event_handler(channel_msg)
+            return
+
+        content = channel_msg.message
+        if not content or not content.event or not channel_msg.identifier:
+            return
+
+        channel_handlers = {
+            "ChatRoomChannel": self.__on_chat_room_channel_event,
+            "GroupUpdatesChannel": self.__on_group_updates_channel_event,
+        }
+        channel_handler = channel_handlers.get(channel_msg.identifier.channel)
+        if channel_handler:
+            await channel_handler(content)
+        else:
+            self.__client.logger.debug(
+                f"Unknown channel: {channel_msg.identifier.channel}"
+            )
+
+    async def __on_error(self, data: dict):
+        self.__client.logger.error(f"ws: __on_error(), data={data}")
+
+    async def __on_close(self, data: dict):
+        self.__client.logger.debug("ws: __on_close()")
+        print(data)
+
+    async def __start_ws(
+        self, email: Optional[str] = None, password: Optional[str] = None
+    ) -> None:
+        """WebSocket の接続を確立する
+
+        Args:
+            email (str, optional):
+            password (str, optional):
+        """
+        if email and password:
+            await self.__client.auth.login(email, password)
 
         if self.__ws_token is None:
-            self.__ws_token = self.__base.MiscAPI.get_web_socket_token().token
+            self.__ws_token = (await self.__client.misc.get_web_socket_token()).token
 
-        self.__ws = websocket.WebSocketApp(
-            f"wss://{Configs.CABLE_HOST}/?token={self.__ws_token}&app_version={Configs.VERSION_NAME}",
-            on_open=self.__on_open,
-            on_message=self.__on_message,
-            on_error=self.__on_error,
-            on_close=self.__on_close,
-        )
-        self.__ws.run_forever()
+        self.__session = aiohttp.ClientSession()
+        async with self.__session.ws_connect(
+            f"wss://{config.CABLE_HOST}/?token={self.__ws_token}&app_version={config.VERSION_NAME}"
+        ) as ws:
+            self.__ws = ws
 
-    def stop(self) -> None:
-        """クライアントを停止します"""
-        self.__ws.keep_running = False
+            await self.__on_open()
+
+            async for msg in ws:
+                match msg.type:
+                    case aiohttp.WSMsgType.TEXT:
+                        await self.__on_message(msg.json())
+                    case aiohttp.WSMsgType.ERROR:
+                        await self.__on_error(msg.json())
+                    case aiohttp.WSMsgType.CLOSE:
+                        await self.__on_close(msg.json())
+
+    def run(self, email: Optional[str] = None, password: Optional[str] = None) -> None:
+        """WebSocket の接続を確立する
+
+        Args:
+            email (str, optional):
+            password (str, optional):
+        """
+        asyncio.run(self.__start_ws(email, password))
+
+    async def stop(self) -> None:
+        """WebSocket の接続を終了する"""
+        if self.__ws is not None:
+            await self.__ws.close()
+
+        if self.__session is not None:
+            await self.__session.close()

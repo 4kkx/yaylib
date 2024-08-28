@@ -1,9 +1,10 @@
 .idea
+.config
 
-nanameue/
 *_test.py
 
 *.jpg
+*.jpeg
 *.png
 *.gif
 *.mp4
@@ -35,7 +36,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-config/
 .pypirc
 
 # PyInstaller

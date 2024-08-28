@@ -22,56 +22,50 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
 
-from __future__ import annotations
-
-from .. import client
-from ..config import Configs
+from .. import config
 from ..responses import ActivitiesResponse
 
 
-class NotificationAPI(object):
-    def __init__(self, base: client.BaseClient) -> None:
-        self.__base = base
+class NotificationApi:
+    """通知 API"""
 
-    def get_user_activities(self, **params) -> ActivitiesResponse:
+    def __init__(self, client) -> None:
+        # pylint: disable=import-outside-toplevel
+        from ..client import Client
+
+        self.__client: Client = client
+
+    async def get_activities(self, **params) -> ActivitiesResponse:
+        """通知を取得する
+
+        Args:
+            important (bool):
+            from_timestamp (int, optional):
+            number (int, optional):
+
+        Returns:
+            ActivitiesResponse:
         """
-
-        Parameters
-        ----------
-            - important: bool - (required)
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
-
-        """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            base_url=Configs.STAGING_HOST_2,
-            route="/api/user_activities",
+            config.STAGING_HOST_2 + "/api/user_activities",
             params=params,
-            data_type=ActivitiesResponse,
+            return_type=ActivitiesResponse,
         )
 
-    def get_user_merged_activities(self, **params) -> ActivitiesResponse:
-        """
-        Parameters
-        ----------
+    async def get_merged_activities(self, **params) -> ActivitiesResponse:
+        """全種類の通知を取得する
 
-            - from_timestamp: int - (optional)
-            - number: int - (optional)
+        Args:
+            from_timestamp (int, optional):
+            number (int, optional):
 
+        Returns:
+            ActivitiesResponse:
         """
-        return self.__base._request(
+        return await self.__client.request(
             "GET",
-            base_url=Configs.STAGING_HOST_2,
-            route="/api/v2/user_activities",
+            config.STAGING_HOST_2 + "/api/v2/user_activities",
             params=params,
-            data_type=ActivitiesResponse,
-        )
-
-    def received_notification(self, pid: str, type: str, opened_at: int = None):
-        # TODO: opened_atはnullalbeか確認する
-        return self.__base._request(
-            "POST",
-            route="/api/received_push_notifications",
-            payload={"pid": pid, "type": type, "opened_at": opened_at},
+            return_type=ActivitiesResponse,
         )
