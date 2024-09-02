@@ -131,11 +131,13 @@ __all__ = ["Client"]
 class RateLimit:
     """レート制限を管理するクラス"""
 
-    def __init__(self, wait_on_ratelimit: bool, max_retries: int) -> None:
+    def __init__(
+        self, wait_on_ratelimit: bool, max_retries: int, retry_after=60 * 5
+    ) -> None:
         self.__wait_on_ratelimit = wait_on_ratelimit
         self.__max_retries = max_retries
         self.__retries_performed = 0
-        self.__retry_after = 60 * 5
+        self.__retry_after = retry_after
 
     @property
     def retries_performed(self) -> int:
@@ -146,6 +148,10 @@ class RateLimit:
         """
         return self.__retries_performed
 
+    @retries_performed.setter
+    def retries_performed(self, value: int) -> None:
+        self.__retries_performed = min(value, self.__max_retries)
+
     @property
     def max_retries(self) -> int:
         """レート制限によるリトライ回数の上限
@@ -155,7 +161,8 @@ class RateLimit:
         """
         return self.__max_retries
 
-    def __max_retries_reached(self) -> bool:
+    @property
+    def max_retries_reached(self) -> bool:
         """リトライ回数上限に達したか否か"""
         return not self.__wait_on_ratelimit or (
             self.__retries_performed >= self.__max_retries
@@ -171,7 +178,7 @@ class RateLimit:
         Raises:
             Exception: リトライ回数の上限でスロー
         """
-        if not self.__wait_on_ratelimit or self.__max_retries_reached():
+        if not self.__wait_on_ratelimit or self.max_retries_reached:
             raise err
         await asyncio.sleep(self.__retry_after)
         self.__retries_performed += 1
@@ -193,6 +200,26 @@ class HeaderManager:
         self.__content_type = "application/json;charset=UTF-8"
 
     @property
+    def locale(self):
+        """ロケール"""
+        return self.__locale
+
+    @property
+    def user_agent(self):
+        """ユーザーエージェント"""
+        return self.__user_agent
+
+    @property
+    def device_info(self) -> str:
+        """デバイス情報"""
+        return self.__device_info
+
+    @property
+    def app_version(self) -> str:
+        """アプリバージョン"""
+        return self.__app_version
+
+    @property
     def client_ip(self) -> str:
         """クライアント IP アドレス"""
         return self.__client_ip
@@ -200,6 +227,21 @@ class HeaderManager:
     @client_ip.setter
     def client_ip(self, value: str) -> None:
         self.__client_ip = value
+
+    @property
+    def connection_speed(self) -> str:
+        """コネクション速度"""
+        return self.__connection_speed
+
+    @property
+    def connection_type(self) -> str:
+        """コネクション種別"""
+        return self.__connection_type
+
+    @property
+    def content_type(self) -> str:
+        """コンテントタイプ"""
+        return self.__content_type
 
     def generate(self, jwt_required=False) -> Dict[str, str]:
         """HTTPヘッダーを生成する"""
@@ -1735,12 +1777,12 @@ class Client(WebSocketInteractor):
             投稿に画像を付与する場合
 
             >>> # サーバー上にアップロード
-            >>> attachments = api.upload_image(
+            >>> attachments = client.upload_image(
             >>>     image_type=yaylib.ImageType.POST,
             >>>     image_paths=["./example.jpg"],
             >>> )
             >>> # サーバー上のファイル名を指定
-            >>> api.create_post(
+            >>> client.create_post(
             >>>     "Hello with yaylib!",
             >>>     attachment_filename=attachments[0].filename
             >>> )
@@ -1766,7 +1808,7 @@ class Client(WebSocketInteractor):
             >>> # サーバー上にアップロード
             >>> filename = client.upload_video("./example.mp4")
             >>> # サーバー上のファイル名を指定
-            >>> api.create_post(
+            >>> client.create_post(
             >>>     "Hello with yaylib!",
             >>>     video_file_name=filename
             >>> )
@@ -2770,13 +2812,13 @@ class Client(WebSocketInteractor):
 
         Examples:
             >>> # ルーキーを取得する:
-            >>> api.get_user_ranking(mode="one_month")
+            >>> client.get_user_ranking(mode="one_month")
 
             >>> # ミドルを取得する:
-            >>> api.get_user_ranking(mode="six_months")
+            >>> client.get_user_ranking(mode="six_months")
 
             >>> # 殿堂入りを取得する:
-            >>> api.get_user_ranking(mode="all_time")
+            >>> client.get_user_ranking(mode="all_time")
 
         Args:
             mode (str):

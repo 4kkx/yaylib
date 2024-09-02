@@ -41,11 +41,13 @@ jobs:
           poetry config --list
 
       - name: Install dependencies
-        run: poetry install
+        run: |
+          poetry install
+          ./poetry_plugins.sh
 
       - name: Build Sphinx
         run: |
-          poetry run make doc
+          make doc
 
       - name: Setup Pages
         uses: actions/configure-pages@v3
